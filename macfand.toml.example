@@ -1,0 +1,101 @@
+# macfand configuration. Install at /etc/macfand.toml.
+#
+# Every key is optional; the values shown are the built-in defaults, which were
+# measured on a MacBookPro9,2 (see the README). An empty file is valid and
+# behaves exactly like having no file at all.
+
+# How often to sample and re-command, in milliseconds. This is independent of
+# the unit's WatchdogSec: the watchdog is fed on its own schedule, so polling
+# more slowly than the watchdog deadline does not get the daemon killed.
+poll_interval_ms = 1000
+
+# Ceilings on how fast the commanded speed may change, in rpm per second.
+# Rising is deliberately near-instant: a load step on this hardware puts the
+# package up 20C inside five seconds and the fan is already the slow part.
+# Falling is slow, because a fan that chases every dip in load is audible in a
+# way a steady one is not. A sensor over its critical threshold, or one that has
+# failed, ignores the rising limit entirely and goes straight to maximum.
+ramp_up_rpm_per_s = 3000.0
+ramp_down_rpm_per_s = 200.0
+
+# Don't rewrite the fan for a change smaller than this.
+deadband_rpm = 40
+
+# Narrow the speed range. Commented out means "use what the SMC reports",
+# which is 2000-6200 rpm on a MacBookPro9,2. These can only narrow that range.
+# min_rpm = 2000
+# max_rpm = 6200
+
+# A reading outside this range is treated as the sensor misreporting rather than
+# as a real temperature. applesmc reports sensors that are not populated on this
+# board (TC0J, TCTD) as 0 or 1 degrees, which would otherwise read as "very
+# cold" and hold the fan down.
+plausible_range_c = [5.0, 125.0]
+
+# How many consecutive bad samples to ride out on the last good reading before
+# treating a sensor as failed. A failed sensor demands maximum, never minimum.
+sensor_grace_polls = 5
+
+# Sensors are named by their label, not by the tempN_input file they live in:
+# the numbering is assigned in probe order and is not stable across kernels.
+# `macfand --show` lists every label this machine exposes.
+#
+#   target              the temperature the sensor is steered towards
+#   critical            above this the fan goes straight to maximum
+#   kp                  rpm per degree over target
+#   ki                  rpm per degree-second — the term mbpfan lacks
+#   integral_limit_rpm  ceiling on the integral's contribution
+#   optional            a missing optional sensor is skipped, not an error
+
+[[sensor]]
+source = "coretemp"
+key = "Package id 0"
+target = 80.0
+critical = 95.0
+kp = 140.0
+ki = 30.0
+
+# CPU proximity, on the heatsink side. Unlike TPCD this does track both load and
+# fan speed, so it is a useful second opinion on the package sensor.
+[[sensor]]
+source = "applesmc"
+key = "TC0P"
+target = 75.0
+critical = 95.0
+kp = 140.0
+ki = 30.0
+
+# The PCH die. Measured 82-91C, moving only 3C between idle and a four-thread
+# load and 3C between 3900 and 6200 rpm, but drifting up over a long hot
+# session. The target sits at the top of that range, so it contributes only when
+# the PCH is at its hottest; integral_limit_rpm bounds that to +1500 rpm over
+# the floor however long it stays there.
+[[sensor]]
+source = "applesmc"
+key = "TPCD"
+target = 90.0
+critical = 100.0
+kp = 200.0
+ki = 40.0
+integral_limit_rpm = 1500
+
+# The palm rest skin — the sensor that corresponds to the chassis feeling hot.
+# Measured 50-53C throughout, including under full load at maximum fan.
+[[sensor]]
+source = "applesmc"
+key = "Ts0S"
+target = 55.0
+critical = 70.0
+kp = 250.0
+ki = 50.0
+integral_limit_rpm = 1200
+
+# Memory proximity. Not present on every model, so optional.
+[[sensor]]
+source = "applesmc"
+key = "TM0P"
+target = 75.0
+critical = 95.0
+kp = 120.0
+ki = 25.0
+optional = true

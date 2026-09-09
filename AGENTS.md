@@ -1,0 +1,2 @@
+- strict no backward compatibility or legacy code path
+- no cargo fmt

@@ -1,0 +1,16 @@
+[package]
+name = "macfand"
+version = "0.0.1"
+edition = "2024"
+description = "A multi-sensor fan control daemon for Intel MacBooks, driving the Apple SMC"
+
+[dependencies]
+anyhow = "1.0.104"
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+signal-hook = "0.3"
+toml = "0.9"
+
+[profile.release]
+lto = true
+strip = true
