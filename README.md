@@ -40,11 +40,12 @@ sudo systemctl restart macfand
 ## Use
 
 ```sh
-macfand --show      # every sensor and fan this machine exposes, with readings
-macfand --restore   # hand the fans back to the SMC
+macfand daemon      # run the control loop; this is what the service runs
+macfand show        # every sensor and fan this machine exposes, with readings
+macfand restore     # hand the fans back to the SMC
 ```
 
-`--show` is how you find sensor labels to put in the config, and it does not need root:
+`show` is how you find sensor labels to put in the config, and it does not need root:
 
 ```
 coretemp (/sys/devices/platform/coretemp.0)
@@ -95,7 +96,7 @@ A daemon that has switched the SMC's own fan curve off is holding a loaded gun: 
 - A sensor that stops reading, or reads outside `plausible_range_c`, is ridden out on its last good value for `sensor_grace_polls` and then **demands maximum**, never minimum. `applesmc` reports sensors that are not populated on a given board as 0 or 1 degrees, which a naive daemon reads as "very cold" and holds the fan down for.
 - A configured sensor that is missing or implausible **at startup is a hard error**, not a warning. Starting up having quietly dropped half its inputs is worse than not starting.
 - The fans are handed back to the SMC on a clean exit, on `SIGTERM`/`SIGINT`/`SIGHUP`, and on a panic.
-- `SIGKILL` cannot be caught, so the unit's `ExecStopPost` runs `macfand --restore` to cover it.
+- `SIGKILL` cannot be caught, so the unit's `ExecStopPost` runs `macfand restore` to cover it.
 - Only one macfand drives the fans. An `flock` on `/run/macfand.lock` is taken **before** any fan is taken off the SMC's curve: two daemons would overwrite each other's commands from two different configurations, and the first of them to exit would hand the fans back to the SMC while the other went on believing it was in control. A file lock rather than a pidfile, so `SIGKILL` releases it too.
 - Handover starts from the speed the fans are already running at, so a machine that is already hot is not briefly slowed down. If any fan's tachometer will not read, macfand takes over at **maximum** rather than assuming the machine is idle — the first poll's `dt` is nearly zero, so the slew limit would take several seconds to walk a wrong guess back.
 - Fan writes that fail persistently — `MAX_WRITE_FAILURES` consecutive — **exit the daemon** rather than being logged forever. The SMC's own curve is switched off for as long as macfand runs, so a daemon that cannot write is holding the fans at a stale speed; exiting hands them back to the SMC. One-off failures are ridden out, because `applesmc` returns `EBUSY` often enough on this hardware to matter.
@@ -134,7 +135,7 @@ So `TPCD` ships with `target = 90.0` — at the top of that range, where it cont
 
 ## Configuration
 
-`/etc/macfand.toml`, or `--config PATH`. Every key is optional and an empty file is valid; see `macfand.toml.example` in the repository, installed as `/usr/share/doc/macfand/macfand.toml.example`, for the annotated defaults.
+`/etc/macfand.toml`, or `--config PATH` on `daemon` and `show`. Every key is optional and an empty file is valid; see `macfand.toml.example` in the repository, installed as `/usr/share/doc/macfand/macfand.toml.example`, for the annotated defaults.
 
 | Key | Default | Description |
 |---|---|---|
@@ -161,4 +162,4 @@ Per sensor:
 
 ## Requirements
 
-Linux on an Intel Mac, with `applesmc` and `coretemp` loaded. Driving the fan needs root; `--show` does not.
+Linux on an Intel Mac, with `applesmc` and `coretemp` loaded. Driving the fan needs root; `macfand show` does not.

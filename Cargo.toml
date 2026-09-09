@@ -1,6 +1,6 @@
 [package]
 name = "macfand"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 description = "A multi-sensor fan control daemon for Intel MacBooks, driving the Apple SMC"
 

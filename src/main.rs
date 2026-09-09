@@ -47,20 +47,23 @@ const MAX_WRITE_FAILURES: u32 = 5;
 const USAGE: &str = "\
 macfand — a multi-sensor fan control daemon for Intel MacBooks
 
-usage: macfand [--config PATH]
-       macfand --show [--config PATH]
-       macfand --restore
+usage: macfand <command> [options]
 
-Runs a PI controller per configured sensor and drives the SMC fans at whichever
-one is asking for the most air, so a hot chassis or PCH raises the fan even when
-the CPU package is comfortable.
+commands:
+  daemon [--config PATH]   run the control loop: a PI controller per configured
+                           sensor, driving the fans at whichever one is asking
+                           for the most air, so a hot chassis or PCH raises the
+                           fan even when the CPU package is comfortable
+  show [--config PATH]     list every sensor and fan the machine exposes, with
+                           current readings, and exit; does not need root
+  restore                  hand every fan back to the SMC and exit
 
-  --config PATH  read this config instead of /etc/macfand.toml; without the
-                 flag a missing file is not an error, the built-in defaults are
-                 used as-is
-  --show         list every sensor and fan the machine exposes, with current
-                 readings, and exit; does not need root
-  --restore      hand every fan back to the SMC and exit
+options:
+  --config PATH   read this config instead of /etc/macfand.toml; without the
+                  flag a missing file is not an error, the built-in defaults
+                  are used as-is
+  -h, --help      print this and exit
+  -V, --version   print the version and exit
 
 Driving the fan needs root, and needs the applesmc and coretemp modules loaded.
 While macfand runs it drives the fans itself, in place of the SMC's own curve;
@@ -74,43 +77,87 @@ fn main() {
     }
 }
 
-enum Mode {
-    Run,
+/// Exit code for a command line we could not make sense of, kept distinct from
+/// the 1 that a failure to actually drive the fans exits with.
+const EXIT_USAGE: i32 = 2;
+
+#[derive(Debug, PartialEq, Eq)]
+enum Command {
+    Daemon,
     Show,
     Restore,
 }
 
-fn run() -> Result<()> {
-    let mut mode = Mode::Run;
+/// What a command line asked for, once it has been understood.
+///
+/// Parsing answers with this rather than doing the work itself so that the
+/// whole of the command line surface can be tested without a process to exit
+/// or an SMC to talk to.
+#[derive(Debug, PartialEq, Eq)]
+enum Invocation {
+    Help,
+    Version,
+    Run(Command, Option<PathBuf>),
+}
+
+/// Understand a command line, or say why it cannot be.
+///
+/// The `Err` is a usage error — a message to put in front of the usage text —
+/// never a failure of the work itself.
+fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, String> {
+    let mut args = args.into_iter();
+    // No command at all is someone finding their way around rather than a
+    // mistake, so it gets the help text rather than an error.
+    let Some(first) = args.next() else {
+        return Ok(Invocation::Help);
+    };
+
+    let command = match first.as_str() {
+        "-h" | "--help" | "help" => return Ok(Invocation::Help),
+        "-V" | "--version" => return Ok(Invocation::Version),
+        "daemon" => Command::Daemon,
+        "show" => Command::Show,
+        "restore" => Command::Restore,
+        other => return Err(format!("unknown command `{other}`")),
+    };
+
+    // Only the two commands that read a config accept one; `restore` talks to
+    // the hardware alone, so a --config there is a mistake worth reporting
+    // rather than something to accept and ignore.
+    let takes_config = matches!(command, Command::Daemon | Command::Show);
     let mut config_path: Option<PathBuf> = None;
-    let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "-h" | "--help" => {
-                println!("{USAGE}");
-                return Ok(());
-            }
-            "-V" | "--version" => {
-                println!("macfand {}", env!("CARGO_PKG_VERSION"));
-                return Ok(());
-            }
-            "--show" => mode = Mode::Show,
-            "--restore" => mode = Mode::Restore,
-            "--config" => {
-                let path = args.next().context("--config needs a path")?;
+            "-h" | "--help" => return Ok(Invocation::Help),
+            "--config" if takes_config => {
+                let path = args.next().ok_or("--config needs a path")?;
                 config_path = Some(PathBuf::from(path));
             }
-            other => {
-                eprintln!("macfand: unexpected argument `{other}`\n\n{USAGE}");
-                std::process::exit(2);
-            }
+            other => return Err(format!("{first}: unexpected argument `{other}`")),
         }
     }
 
-    match mode {
-        Mode::Show => show(config_path.as_deref()),
-        Mode::Restore => restore(),
-        Mode::Run => daemon(config_path.as_deref()),
+    Ok(Invocation::Run(command, config_path))
+}
+
+fn run() -> Result<()> {
+    let invocation = parse(std::env::args().skip(1)).unwrap_or_else(|message| {
+        eprintln!("macfand: {message}\n\n{USAGE}");
+        std::process::exit(EXIT_USAGE);
+    });
+
+    match invocation {
+        Invocation::Help => {
+            println!("{USAGE}");
+            Ok(())
+        }
+        Invocation::Version => {
+            println!("macfand {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        Invocation::Run(Command::Daemon, config) => daemon(config.as_deref()),
+        Invocation::Run(Command::Show, config) => show(config.as_deref()),
+        Invocation::Run(Command::Restore, _) => restore(),
     }
 }
 
@@ -563,6 +610,94 @@ fn show(config_path: Option<&Path>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parsed(args: &[&str]) -> Invocation {
+        parse(args.iter().map(|a| a.to_string())).expect("this command line must be understood")
+    }
+
+    fn rejected(args: &[&str]) -> String {
+        parse(args.iter().map(|a| a.to_string())).expect_err("this command line must be rejected")
+    }
+
+    #[test]
+    fn each_command_stands_on_its_own() {
+        assert_eq!(parsed(&["daemon"]), Invocation::Run(Command::Daemon, None));
+        assert_eq!(parsed(&["show"]), Invocation::Run(Command::Show, None));
+        assert_eq!(parsed(&["restore"]), Invocation::Run(Command::Restore, None));
+    }
+
+    #[test]
+    fn nothing_at_all_is_help_rather_than_an_error() {
+        // Bare `macfand` used to start the daemon. It must not do so now that
+        // the daemon has a name: an operator typing it expects to be told what
+        // the commands are, not to have the SMC taken off its own fan curve.
+        assert_eq!(parsed(&[]), Invocation::Help);
+    }
+
+    #[test]
+    fn help_and_version_are_spelled_every_usual_way() {
+        for args in [&["-h"][..], &["--help"], &["help"]] {
+            assert_eq!(parsed(args), Invocation::Help, "{args:?}");
+        }
+        for args in [&["-V"][..], &["--version"]] {
+            assert_eq!(parsed(args), Invocation::Version, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn help_asked_for_after_a_command_is_still_help() {
+        // Not a daemon run with a stray flag — asking `macfand daemon --help`
+        // must never be what drives the fans.
+        assert_eq!(parsed(&["daemon", "--help"]), Invocation::Help);
+        assert_eq!(parsed(&["show", "-h"]), Invocation::Help);
+        assert_eq!(parsed(&["restore", "--help"]), Invocation::Help);
+    }
+
+    #[test]
+    fn the_commands_that_read_a_config_take_one() {
+        let expected = Some(PathBuf::from("/tmp/macfand.toml"));
+        assert_eq!(
+            parsed(&["daemon", "--config", "/tmp/macfand.toml"]),
+            Invocation::Run(Command::Daemon, expected.clone())
+        );
+        assert_eq!(
+            parsed(&["show", "--config", "/tmp/macfand.toml"]),
+            Invocation::Run(Command::Show, expected)
+        );
+    }
+
+    #[test]
+    fn a_config_restore_cannot_use_is_refused_rather_than_ignored() {
+        // Accepting it silently would let an operator believe `restore` had
+        // read their file and done something specific to it.
+        assert!(rejected(&["restore", "--config", "/tmp/macfand.toml"]).contains("--config"));
+    }
+
+    #[test]
+    fn a_config_flag_with_no_path_is_a_usage_error() {
+        // And a usage error, not a run that quietly falls back to the default
+        // config: the operator named a file they meant to be used.
+        assert!(rejected(&["daemon", "--config"]).contains("needs a path"));
+    }
+
+    #[test]
+    fn unknown_commands_and_stray_arguments_are_refused() {
+        assert!(rejected(&["bogus"]).contains("bogus"));
+        assert!(rejected(&["daemon", "extra"]).contains("extra"));
+        // A path where the command belongs is the likeliest typo of all, and
+        // must not be mistaken for a command.
+        assert!(rejected(&["/etc/macfand.toml"]).contains("unknown command"));
+    }
+
+    #[test]
+    fn the_flags_the_subcommands_replaced_are_gone() {
+        // There is no compatibility path back to the old spelling; these must
+        // fail loudly rather than being quietly accepted again some day.
+        for args in [&["--show"][..], &["--restore"], &["--config", "/tmp/macfand.toml"]] {
+            let message = rejected(args);
+            assert!(message.contains("unknown command"), "{args:?} gave: {message}");
+        }
+    }
 
     #[test]
     fn the_fans_cannot_be_claimed_twice() {
