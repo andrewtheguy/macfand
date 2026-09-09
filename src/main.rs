@@ -296,9 +296,10 @@ fn daemon(config_path: Option<&Path>) -> Result<()> {
     );
     for s in &sensors {
         eprintln!(
-            "macfand:   {} ({}) target {}C critical {}C",
+            "macfand:   {} ({}) from {}C target {}C critical {}C",
             s.key(),
             s.cfg.source,
+            s.cfg.baseline_from,
             s.cfg.target,
             s.cfg.critical
         );

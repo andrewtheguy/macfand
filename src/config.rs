@@ -47,8 +47,18 @@ pub struct SensorConfig {
     pub source: Source,
     /// The sensor's label, e.g. `TPCD` or `Package id 0`.
     pub key: String,
-    /// The temperature this sensor is steered towards. The fan sits at its
-    /// minimum while the sensor is below target.
+    /// The temperature at which this sensor starts asking for air. Below it
+    /// the sensor demands the minimum; from here up to `critical` it demands a
+    /// linear ramp across the whole speed range, so the demand rises with
+    /// temperature instead of staying flat at the floor until `target`.
+    ///
+    /// Without this the daemon takes a fan the SMC had spun up and walks it
+    /// down to the floor whenever every sensor happens to be a degree or two
+    /// under target — steering *down* on the strength of sensors nothing else
+    /// reads, which is the reverse of the point.
+    pub baseline_from: f64,
+    /// The temperature this sensor is steered towards. Past it the PI
+    /// controller takes over from the baseline ramp wherever it asks for more.
     pub target: f64,
     /// Above this, the fan goes straight to maximum, bypassing the controller.
     pub critical: f64,
@@ -111,10 +121,13 @@ impl Default for Config {
 fn default_sensors() -> Vec<SensorConfig> {
     vec![
         // The CPU package. Target 80 keeps it clear of the 87 degree
-        // temp1_max without running the fan up over ordinary desktop work.
+        // temp1_max without running the fan up over ordinary desktop work, and
+        // the baseline picks up from 60 so a package sitting in the seventies
+        // is answered with air rather than with the floor.
         SensorConfig {
             source: Source::Coretemp,
             key: "Package id 0".into(),
+            baseline_from: 60.0,
             target: 80.0,
             critical: 95.0,
             kp: 140.0,
@@ -128,6 +141,7 @@ fn default_sensors() -> Vec<SensorConfig> {
         SensorConfig {
             source: Source::Applesmc,
             key: "TC0P".into(),
+            baseline_from: 55.0,
             target: 75.0,
             critical: 95.0,
             kp: 140.0,
@@ -137,14 +151,17 @@ fn default_sensors() -> Vec<SensorConfig> {
         },
         // The PCH die. Measured 82-91: barely coupled to either load (+3C from
         // idle to a four-thread load) or airflow (-3C from 3900 to 6200 rpm),
-        // but it does drift up over a long hot session. The target sits at the
-        // top of that range, so it contributes only when the PCH is at its
-        // hottest, and integral_limit_rpm bounds that contribution to +1500 rpm
-        // over the floor however long it stays there. Lower it below about 85
-        // and the fan pins at maximum permanently in exchange for 3 degrees.
+        // but it does drift up over a long hot session. The baseline starts at
+        // the bottom of that range, so the whole of it asks for progressively
+        // more air — 89C, which used to ask for nothing at all, asks for about
+        // 3900 rpm. The target stays at the top of the range and
+        // integral_limit_rpm bounds the winding to +1500 rpm, because the
+        // integral is the term that would otherwise pin the fan at maximum
+        // indefinitely on a sensor airflow cannot reach.
         SensorConfig {
             source: Source::Applesmc,
             key: "TPCD".into(),
+            baseline_from: 80.0,
             target: 90.0,
             critical: 100.0,
             kp: 200.0,
@@ -156,11 +173,13 @@ fn default_sensors() -> Vec<SensorConfig> {
         // feeling hot, and the one this daemon exists to take notice of.
         // Measured 50-53 throughout, including under full load at maximum fan.
         // Same caveat as TPCD: it moved one degree when the fan went from 3900
-        // to 6200 rpm, so the target sits above everything observed and the
+        // to 6200 rpm, so the baseline is deliberately shallow — 50 to a
+        // critical of 70 — the target sits above everything observed, and the
         // integral is capped.
         SensorConfig {
             source: Source::Applesmc,
             key: "Ts0S".into(),
+            baseline_from: 50.0,
             target: 55.0,
             critical: 70.0,
             kp: 250.0,
@@ -172,6 +191,7 @@ fn default_sensors() -> Vec<SensorConfig> {
         SensorConfig {
             source: Source::Applesmc,
             key: "TM0P".into(),
+            baseline_from: 55.0,
             target: 75.0,
             critical: 95.0,
             kp: 120.0,
@@ -230,12 +250,24 @@ impl Config {
             bail!("no sensors configured; the fan would have nothing to steer on");
         }
         for s in &self.sensors {
-            for (name, value) in
-                [("target", s.target), ("critical", s.critical), ("kp", s.kp), ("ki", s.ki)]
-            {
+            for (name, value) in [
+                ("baseline_from", s.baseline_from),
+                ("target", s.target),
+                ("critical", s.critical),
+                ("kp", s.kp),
+                ("ki", s.ki),
+            ] {
                 if !value.is_finite() {
                     bail!("sensor {} has a non-finite {name} ({value})", s.key);
                 }
+            }
+            if s.baseline_from >= s.target {
+                bail!(
+                    "sensor {} baseline_from ({}) must be below its target ({})",
+                    s.key,
+                    s.baseline_from,
+                    s.target
+                );
             }
             if s.target >= s.critical {
                 bail!(
@@ -245,11 +277,11 @@ impl Config {
                     s.critical
                 );
             }
-            if s.target < lo || s.critical > hi {
+            if s.baseline_from < lo || s.critical > hi {
                 bail!(
-                    "sensor {} has target/critical ({}/{}) outside plausible_range_c ([{lo}, {hi}]), so it could never be steered on",
+                    "sensor {} has baseline_from/critical ({}/{}) outside plausible_range_c ([{lo}, {hi}]), so it could never be steered on",
                     s.key,
-                    s.target,
+                    s.baseline_from,
                     s.critical
                 );
             }
@@ -271,6 +303,11 @@ impl Config {
 mod tests {
     use super::*;
 
+    /// One `[[sensor]]` table with the given body appended.
+    fn sensor(body: &str) -> String {
+        format!("[[sensor]]\nsource = \"coretemp\"\nkey = \"Package id 0\"\n{body}")
+    }
+
     fn parse(body: &str) -> Result<Config> {
         let config: Config = toml::from_str(body)?;
         config.validate()?;
@@ -287,15 +324,33 @@ mod tests {
         // `nan` and `inf` are ordinary TOML floats, and NaN compares false
         // against every bound, so nothing else in validate() catches them.
         for body in [
-            "ramp_up_rpm_per_s = nan",
-            "ramp_down_rpm_per_s = inf",
-            "plausible_range_c = [nan, 125.0]",
-            "[[sensor]]\nsource = \"coretemp\"\nkey = \"Package id 0\"\ntarget = nan\ncritical = 95.0",
-            "[[sensor]]\nsource = \"coretemp\"\nkey = \"Package id 0\"\ntarget = 80.0\ncritical = nan",
-            "[[sensor]]\nsource = \"coretemp\"\nkey = \"Package id 0\"\ntarget = 80.0\ncritical = 95.0\nkp = nan",
-            "[[sensor]]\nsource = \"coretemp\"\nkey = \"Package id 0\"\ntarget = 80.0\ncritical = 95.0\nki = -inf",
+            "ramp_up_rpm_per_s = nan".to_string(),
+            "ramp_down_rpm_per_s = inf".to_string(),
+            "plausible_range_c = [nan, 125.0]".to_string(),
+            sensor("baseline_from = nan\ntarget = 80.0\ncritical = 95.0"),
+            sensor("baseline_from = 60.0\ntarget = nan\ncritical = 95.0"),
+            sensor("baseline_from = 60.0\ntarget = 80.0\ncritical = nan"),
+            sensor("baseline_from = 60.0\ntarget = 80.0\ncritical = 95.0\nkp = nan"),
+            sensor("baseline_from = 60.0\ntarget = 80.0\ncritical = 95.0\nki = -inf"),
         ] {
-            assert!(parse(body).is_err(), "should have been rejected: {body:?}");
+            assert!(parse(&body).is_err(), "should have been rejected: {body:?}");
         }
+    }
+
+    #[test]
+    fn a_baseline_that_starts_at_or_above_target_is_rejected() {
+        // The ramp runs baseline_from -> critical and the controller takes over
+        // at target; a baseline starting at or past the target would invert
+        // that, and an empty or negative span would divide by zero.
+        assert!(parse(&sensor("baseline_from = 80.0\ntarget = 80.0\ncritical = 95.0")).is_err());
+        assert!(parse(&sensor("baseline_from = 90.0\ntarget = 80.0\ncritical = 95.0")).is_err());
+        assert!(parse(&sensor("baseline_from = 60.0\ntarget = 80.0\ncritical = 95.0")).is_ok());
+    }
+
+    #[test]
+    fn a_baseline_below_the_plausible_range_is_rejected() {
+        // It could never be steered on: a reading that low is failed as a
+        // misreport before it ever reaches the ramp.
+        assert!(parse(&sensor("baseline_from = 2.0\ntarget = 80.0\ncritical = 95.0")).is_err());
     }
 }

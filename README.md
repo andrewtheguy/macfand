@@ -2,7 +2,7 @@
 
 A fan control daemon for Intel MacBooks that steers on every sensor on the board, not just the CPU.
 
-`mbpfan` and `macfanctld` read the CPU package temperature and nothing else. Everything else the SMC exposes — the PCH die, memory, the chassis skin — can sit at whatever temperature it likes without the fan ever noticing. macfand runs a PI controller per configured sensor and commands whichever one is asking for the most air.
+`mbpfan` and `macfanctld` read the CPU package temperature and nothing else. Everything else the SMC exposes — the PCH die, memory, the chassis skin — can sit at whatever temperature it likes without the fan ever noticing. macfand gives every configured sensor a rising demand curve and a PI controller, and commands whichever one is asking for the most air. Reading more sensors is only worth doing if it can raise the fan, so the curves are built to do exactly that: a sensor's demand only ever goes up with its temperature.
 
 ## Install
 
@@ -77,7 +77,14 @@ Sensors are named by label, never by the `tempN_input` file they happen to live 
 
 ## How it steers
 
-Each sensor gets a `target`, a `critical`, and PI gains. Every poll, each sensor's controller produces a demanded speed, and **the fan runs at the highest of them**. Taking the maximum rather than an average is the whole design: a daemon that averages sits at a comfortable speed while one sensor bakes.
+Each sensor gets a `baseline_from`, a `target`, a `critical`, and PI gains. Every poll, each sensor produces a demanded speed, and **the fan runs at the highest of them**. Taking the maximum rather than an average is the whole design: a daemon that averages sits at a comfortable speed while one sensor bakes.
+
+A sensor's demand has two parts, and it takes whichever of them is asking for more:
+
+- **The baseline ramp** runs from the floor at `baseline_from` to the ceiling at `critical`, so the demand climbs with temperature over the sensor's whole working range. This is the part that makes reading the extra sensors worth anything. A controller that only responds above its target contributes exactly nothing below it, so a board with every sensor a degree or two under target demands the floor from all of them at once — and the daemon then walks a fan the SMC had spun up all the way down, having consulted five sensors to arrive at less air than a daemon that reads one. With the ramp, the PCH at 89 °C asks for about 3900 rpm rather than for nothing.
+- **The PI controller** takes over past `target`, where the ramp alone is no longer enough. The two compose by maximum rather than by sum, because `integral_limit_rpm` (below) exists precisely to stop one sensor pinning the fan, and adding the two would hand it that anyway by another route.
+
+Both are monotone in temperature, so a sensor getting hotter never asks for less air than it did a degree ago.
 
 The integral term is what `mbpfan` lacks. A proportional-only response settles as soon as its fixed contribution balances, which is how a sensor ends up parked several degrees above target indefinitely. The integral keeps pushing until the error is actually gone.
 
@@ -108,13 +115,13 @@ A daemon that has switched the SMC's own fan curve off is holding a loaded gun: 
 
 The shipped defaults were measured on a MacBookPro9,2 (13-inch, mid-2012, Debian 13), not guessed. Five sensors ship configured:
 
-| sensor | source | target | critical | capped | |
-|---|---|---|---|---|---|
-| `Package id 0` | coretemp | 80 | 95 | — | The CPU package, clear of its 87 °C `temp1_max` |
-| `TC0P` | applesmc | 75 | 95 | — | CPU proximity; tracks both load and fan speed |
-| `TPCD` | applesmc | 90 | 100 | 1500 rpm | The PCH die — see below |
-| `Ts0S` | applesmc | 55 | 70 | 1200 rpm | Palm rest skin — see below |
-| `TM0P` | applesmc | 75 | 95 | — | Memory proximity; `optional`, absent on some models |
+| sensor | source | from | target | critical | capped | |
+|---|---|---|---|---|---|---|
+| `Package id 0` | coretemp | 60 | 80 | 95 | — | The CPU package, clear of its 87 °C `temp1_max` |
+| `TC0P` | applesmc | 55 | 75 | 95 | — | CPU proximity; tracks both load and fan speed |
+| `TPCD` | applesmc | 80 | 90 | 100 | 1500 rpm | The PCH die — see below |
+| `Ts0S` | applesmc | 50 | 55 | 70 | 1200 rpm | Palm rest skin — see below |
+| `TM0P` | applesmc | 55 | 75 | 95 | — | Memory proximity; `optional`, absent on some models |
 
 `TM0P` is the only one marked `optional`, so a board without it starts normally rather than erroring out.
 
@@ -131,7 +138,7 @@ TPCD (the PCH die) moved **3 °C for a 59% increase in airflow**, and **3 °C be
 
 Over a longer hot session TPCD drifts further, to 91 °C. That is the full range it occupies: **82–91 °C, almost independently of anything the fan does.**
 
-So `TPCD` ships with `target = 90.0` — at the top of that range, where it contributes only when the PCH is at its hottest, and `integral_limit_rpm = 1500` bounds that contribution to +1500 rpm over the floor no matter how long it stays there. Without the cap, a sensor that airflow cannot reach winds its integral all the way up and pins the fan at maximum permanently. Drop the target below about 85 and you get that outcome deliberately, in exchange for roughly 3 °C.
+So `TPCD` ships with `baseline_from = 80.0` and `target = 90.0`: its baseline ramp spans the whole 82–91 °C range it actually occupies, asking for about 2400 rpm at the bottom of it and about 4300 rpm at the top, while the target stays where the PI controller only engages when the PCH is at its hottest. `integral_limit_rpm = 1500` bounds the winding part to +1500 rpm over the floor no matter how long it stays there. Without the cap, a sensor that airflow cannot reach winds its integral all the way up and pins the fan at maximum permanently — a bounded ramp raises the fan for a hot PCH without ever getting there.
 
 **If your complaint is that the chassis feels hot, a fan daemon is not the fix.** The measurements above are what that conclusion rests on. The lever that does work is reducing heat generation — on this machine the RAPL long-term package limit ships programmed at 100 W on a part whose thermal design power is 35 W.
 
@@ -155,6 +162,7 @@ Per sensor:
 |---|---|
 | `source` | `applesmc` or `coretemp` |
 | `key` | The sensor's label, e.g. `TPCD`, `Package id 0` |
+| `baseline_from` | Where its demand starts rising; a linear ramp from here to `critical` |
 | `target` | The temperature it is steered towards |
 | `critical` | Above this, straight to maximum |
 | `kp` | rpm per degree over target |
