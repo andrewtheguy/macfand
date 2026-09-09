@@ -342,9 +342,11 @@ fn daemon(config_path: Option<&Path>) -> Result<()> {
 
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
-        // Clamped because a suspend/resume cycle hands us an enormous dt, which
-        // would otherwise let the integral jump the fan straight to maximum.
-        let dt = (now - previous).as_secs_f64().clamp(0.0, interval.as_secs_f64() * 4.0);
+        // Passed on as it really is. A suspend/resume cycle hands us an
+        // enormous dt, and the governor is the thing that knows which parts of
+        // its own arithmetic want the real elapsed time and which want it
+        // bounded; clamping here took that choice away from it.
+        let dt = (now - previous).as_secs_f64();
         previous = now;
 
         for (key, problem) in governor.sample() {

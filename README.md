@@ -92,7 +92,7 @@ Three things bound it:
 
 - **`integral_limit_rpm`** caps how much one sensor's integral may contribute. This exists for sensors airflow barely moves (see below) — without it, such a sensor winds all the way up and pins the fan at maximum forever in exchange for nothing.
 - **Anti-windup**: the integral is clamped to the usable speed range, so a sensor that sits above target for an hour cannot bank a term that then takes an hour to unwind.
-- **Slew limiting**: `ramp_up_rpm_per_s` is near-instant by design; `ramp_down_rpm_per_s` is slow, because a fan that chases every dip in load is audible in a way a steady one is not.
+- **Slew limiting**: `ramp_up_rpm_per_s` is near-instant by design; coming down is stepped rather than rated — the fan holds a speed for `ramp_down_step_interval_s`, drops `ramp_down_step_rpm`, and holds again, because a fan whose pitch is a little different every second is audible in a way a fan that sits still and occasionally drops is not.
 
 `critical` bypasses the controller entirely and goes straight to maximum, unaffected by any cap and unaffected by the upward slew limit — an emergency gets the air it is asking for on the poll it is detected, not several seconds later. A failed sensor is treated the same way.
 
@@ -150,7 +150,8 @@ So `TPCD` ships with `baseline_from = 80.0` and `target = 90.0`: its baseline ra
 |---|---|---|
 | `poll_interval_ms` | `1000` | Sample and re-command interval |
 | `ramp_up_rpm_per_s` | `3000.0` | Ceiling on how fast the speed may rise; critical and failed sensors bypass it |
-| `ramp_down_rpm_per_s` | `200.0` | Ceiling on how fast it may fall |
+| `ramp_down_step_rpm` | `400` | How much the speed drops in one step down |
+| `ramp_down_step_interval_s` | `10.0` | How long the fan holds a speed before the next step down |
 | `deadband_rpm` | `40` | Don't rewrite the fan for a change smaller than this |
 | `min_rpm` / `max_rpm` | hardware | Narrow the SMC's range; cannot widen it |
 | `plausible_range_c` | `[5.0, 125.0]` | Outside this, a reading is a misreport, not a temperature |
