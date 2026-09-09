@@ -40,6 +40,15 @@ sensor_grace_polls = 5
 # the numbering is assigned in probe order and is not stable across kernels.
 # `macfand show` lists every label this machine exposes.
 #
+# A key macfand does not recognise is a startup error, not something ignored.
+#
+#   baseline_from       the temperature at which the sensor starts asking for
+#                       air; from here to `critical` it demands a linear ramp
+#                       across the whole speed range, so the fan rises with
+#                       temperature instead of sitting at the floor until
+#                       `target`. Required, like target and critical: it
+#                       depends on where this sensor actually sits, and the
+#                       values below were measured rather than guessed.
 #   target              the temperature the sensor is steered towards
 #   critical            above this the fan goes straight to maximum
 #   kp                  rpm per degree over target
@@ -50,6 +59,7 @@ sensor_grace_polls = 5
 [[sensor]]
 source = "coretemp"
 key = "Package id 0"
+baseline_from = 60.0
 target = 80.0
 critical = 95.0
 kp = 140.0
@@ -60,6 +70,7 @@ ki = 30.0
 [[sensor]]
 source = "applesmc"
 key = "TC0P"
+baseline_from = 55.0
 target = 75.0
 critical = 95.0
 kp = 140.0
@@ -67,12 +78,13 @@ ki = 30.0
 
 # The PCH die. Measured 82-91C, moving only 3C between idle and a four-thread
 # load and 3C between 3900 and 6200 rpm, but drifting up over a long hot
-# session. The target sits at the top of that range, so it contributes only when
-# the PCH is at its hottest; integral_limit_rpm bounds that to +1500 rpm over
-# the floor however long it stays there.
+# session. The baseline starts at the bottom of that range so the whole of it
+# asks for progressively more air; the target stays at the top, and
+# integral_limit_rpm bounds the winding to +1500 rpm however long it stays there.
 [[sensor]]
 source = "applesmc"
 key = "TPCD"
+baseline_from = 80.0
 target = 90.0
 critical = 100.0
 kp = 200.0
@@ -80,10 +92,12 @@ ki = 40.0
 integral_limit_rpm = 1500
 
 # The palm rest skin — the sensor that corresponds to the chassis feeling hot.
-# Measured 50-53C throughout, including under full load at maximum fan.
+# Measured 50-53C throughout, including under full load at maximum fan, so its
+# baseline is deliberately shallow: 50C to a critical of 70C.
 [[sensor]]
 source = "applesmc"
 key = "Ts0S"
+baseline_from = 50.0
 target = 55.0
 critical = 70.0
 kp = 250.0
@@ -94,6 +108,7 @@ integral_limit_rpm = 1200
 [[sensor]]
 source = "applesmc"
 key = "TM0P"
+baseline_from = 55.0
 target = 75.0
 critical = 95.0
 kp = 120.0

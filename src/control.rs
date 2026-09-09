@@ -15,7 +15,7 @@ use crate::sysfs::read_temp;
 /// fan speed can always be traced to the sensor that asked for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reason {
-    /// Every sensor is below its target.
+    /// Every sensor is below the temperature at which it starts asking for air.
     Idle,
     /// A sensor is above target and its controller is asking for this speed.
     Steering(String),
@@ -28,7 +28,7 @@ pub enum Reason {
 impl std::fmt::Display for Reason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Reason::Idle => write!(f, "all sensors below target"),
+            Reason::Idle => write!(f, "every sensor cold enough to ask for nothing"),
             Reason::Steering(k) => write!(f, "steering on {k}"),
             Reason::Critical(k) => write!(f, "{k} above critical"),
             Reason::Failed(k) => write!(f, "{k} unreadable, failing safe"),
@@ -103,6 +103,24 @@ impl Sensor {
         if self.consecutive_bad == 1 { problem } else { None }
     }
 
+    /// The speed this sensor asks for on temperature alone: a linear ramp from
+    /// the floor at `baseline_from` to the ceiling at `critical`.
+    ///
+    /// This is what keeps the daemon from idling a fan the SMC had spun up. A
+    /// controller that only responds above its target contributes exactly
+    /// nothing until it crosses that target, so a board with every sensor a
+    /// couple of degrees under sits at the floor — slower than the curve it
+    /// took over from, which is the opposite of the point of reading the extra
+    /// sensors at all. The ramp makes the demand rise monotonically with
+    /// temperature over the whole range instead.
+    fn baseline(&self, temp: f64, min_rpm: f64, max_rpm: f64) -> f64 {
+        // Validation guarantees baseline_from < target < critical, so the span
+        // is positive.
+        let span = self.cfg.critical - self.cfg.baseline_from;
+        let fraction = ((temp - self.cfg.baseline_from) / span).clamp(0.0, 1.0);
+        min_rpm + fraction * (max_rpm - min_rpm)
+    }
+
     /// How much this sensor's integral term is allowed to contribute.
     fn integral_ceiling(&self, min_rpm: f64, max_rpm: f64) -> f64 {
         let span = max_rpm - min_rpm;
@@ -139,7 +157,12 @@ impl Sensor {
         self.integral =
             (self.integral + self.cfg.ki * error * dt).clamp(0.0, self.integral_ceiling(min_rpm, max_rpm));
 
-        let rpm = min_rpm + self.cfg.kp * error + self.integral;
+        // The baseline and the controller compose by taking whichever is
+        // asking for more, not by adding: `integral_limit_rpm` exists to stop a
+        // sensor airflow cannot reach from winding the fan up to maximum, and
+        // summing the two would hand it that anyway by another route.
+        let rpm =
+            (min_rpm + self.cfg.kp * error + self.integral).max(self.baseline(temp, min_rpm, max_rpm));
         let reason = if rpm <= min_rpm {
             Reason::Idle
         } else {
@@ -245,6 +268,9 @@ mod tests {
         SensorConfig {
             source: Source::Applesmc,
             key: key.into(),
+            // Deliberately shallow: most of these tests are about the
+            // controller, and a wide baseline would answer for it.
+            baseline_from: target - 5.0,
             target,
             critical,
             kp: 100.0,
@@ -318,14 +344,43 @@ mod tests {
     }
 
     #[test]
+    fn the_baseline_ramp_asks_for_air_below_target_instead_of_the_floor() {
+        // The complaint this exists for: a sensor a degree under its target
+        // used to demand exactly the floor, so the daemon walked a fan the SMC
+        // had spun up all the way down. baseline_from is target - 5 here, so
+        // 74C is 4 degrees into the 25 degree ramp that runs from there to
+        // critical.
+        let mut g = governor(vec![sensor("TC0P", 75.0, 95.0, 74.0)]);
+        let cmd = g.step(1.0);
+        assert_eq!(cmd.rpm, 2672, "2000 + (74-70)/(95-70) * 4200");
+        assert_eq!(cmd.reason, Reason::Steering("TC0P".into()));
+    }
+
+    #[test]
+    fn the_baseline_ramp_never_falls_as_a_sensor_heats() {
+        // "Steer up, never down": the demand must be monotone in temperature
+        // across the whole range, with no dip where the baseline hands over to
+        // the controller at target.
+        let mut previous = 0;
+        for tenths in 500..=949 {
+            let temp = tenths as f64 / 10.0;
+            let mut g = governor(vec![sensor("TC0P", 75.0, 95.0, temp)]);
+            let rpm = g.step(1.0).rpm;
+            assert!(rpm >= previous, "demand fell from {previous} to {rpm} at {temp}C");
+            previous = rpm;
+        }
+    }
+
+    #[test]
     fn the_integral_closes_a_gap_that_proportional_alone_leaves_open() {
         // A sensor parked 2 degrees over target: kp alone contributes a fixed
-        // 200 rpm forever. The integral is what keeps pushing. This is the
-        // mbpfan failure mode the daemon exists to fix.
+        // 200 rpm forever, and the baseline a fixed amount for that
+        // temperature. The integral is what keeps pushing past both. This is
+        // the mbpfan failure mode the daemon exists to fix.
         let mut g = governor(vec![sensor("TC0P", 75.0, 95.0, 77.0)]);
         let first = g.step(1.0).rpm;
         let mut last = first;
-        for _ in 0..10 {
+        for _ in 0..200 {
             last = g.step(1.0).rpm;
         }
         assert!(last > first, "integral should keep raising the demand ({first} -> {last})");
@@ -355,6 +410,9 @@ mod tests {
         let mut c = cfg("TPCD", 87.0, 100.0);
         c.kp = 0.0;
         c.integral_limit_rpm = Some(1500);
+        // Started high enough that its own ramp asks for less than the cap at
+        // 89C, so this measures the cap and not the baseline.
+        c.baseline_from = 85.0;
         let mut s = Sensor::new(c, Path::new("/nonexistent"));
         s.last_good = Some(89.0);
         let mut g = governor(vec![s]);
@@ -384,8 +442,43 @@ mod tests {
         assert_eq!(g.step(1.0).rpm, 6200, "critical must still go to maximum");
         g.sensors[0].last_good = Some(75.0);
         let cmd = g.step(1.0);
-        assert_eq!(cmd.rpm, 2000, "must come back to the floor once at target");
-        assert_eq!(cmd.reason, Reason::Idle);
+        // Back to what the baseline alone asks for at 75C, carrying nothing
+        // out of the excursion.
+        assert_eq!(cmd.rpm, 2840, "2000 + (75-70)/(95-70) * 4200");
+        assert_eq!(cmd.reason, Reason::Steering("TC0P".into()));
+    }
+
+    #[test]
+    fn the_shipped_defaults_do_not_idle_the_fan_at_the_measured_operating_points() {
+        // The rows of the README's measurement table, in the order the default
+        // sensors are configured. Every one of these used to command the 2000
+        // rpm floor: each sensor sat below its target, so the daemon consulted
+        // five of them and asked for less air than the SMC curve it had just
+        // switched off.
+        for (what, temps, expected) in [
+            ("light load", [70.0, 64.0, 85.0, 51.0, 54.0], 3200),
+            ("four threads flat out", [86.0, 78.0, 88.0, 52.0, 54.0], 5120),
+            ("sustained hot session", [77.0, 70.0, 91.0, 54.0, 54.0], 4310),
+        ] {
+            let sensors = Config::default()
+                .sensors
+                .into_iter()
+                .zip(temps)
+                .map(|(cfg, temp)| {
+                    let mut s = Sensor::new(cfg, Path::new("/nonexistent"));
+                    s.last_good = Some(temp);
+                    s
+                })
+                .collect();
+            // Slew limiting is not what is under test here.
+            let config = Config {
+                ramp_up_rpm_per_s: 100_000.0,
+                ramp_down_rpm_per_s: 100_000.0,
+                ..Config::default()
+            };
+            let mut g = Governor::new(&config, sensors, 2000, 6200, 2000);
+            assert_eq!(g.step(1.0).rpm, expected, "{what}");
+        }
     }
 
     #[test]
