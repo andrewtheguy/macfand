@@ -44,7 +44,11 @@ sensor_grace_polls = 5
 #                       air; from here to `critical` it demands a linear ramp
 #                       across the whole speed range, so the fan rises with
 #                       temperature instead of sitting at the floor until
-#                       `target`
+#                       `target`. Unset it starts at the bottom of
+#                       plausible_range_c, which is the loudest ramp there is:
+#                       a sensor whose ramp nobody has measured errs towards
+#                       air rather than towards quiet. The values below were
+#                       measured; name one of your own rather than leaving it.
 #   target              the temperature the sensor is steered towards
 #   critical            above this the fan goes straight to maximum
 #   kp                  rpm per degree over target

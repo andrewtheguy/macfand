@@ -56,6 +56,16 @@ pub struct SensorConfig {
     /// down to the floor whenever every sensor happens to be a degree or two
     /// under target — steering *down* on the strength of sensors nothing else
     /// reads, which is the reverse of the point.
+    ///
+    /// Unset, it starts at the bottom of the plausible range, ramping across
+    /// everything the sensor can legibly read. That is the most air any ramp
+    /// can ask for, and deliberately so: an operator who has not said where a
+    /// sensor should begin spinning up has not said it is safe to wait, and
+    /// every other unknown here — a failed sensor, an implausible reading, a
+    /// tachometer that will not read — already resolves towards air. It is
+    /// louder than any measured configuration, so it is the kind of wrong that
+    /// gets noticed and corrected rather than the kind that cooks a laptop.
+    #[serde(default = "default_baseline_from")]
     pub baseline_from: f64,
     /// The temperature this sensor is steered towards. Past it the PI
     /// controller takes over from the baseline ramp wherever it asks for more.
@@ -89,6 +99,15 @@ pub struct SensorConfig {
     pub optional: bool,
 }
 
+/// The bottom of the plausible temperature range, and so the earliest a
+/// baseline ramp can start. A reading below this is a misreport rather than a
+/// temperature, so there is nothing colder for a ramp to begin at.
+const PLAUSIBLE_LOW_C: f64 = 5.0;
+
+fn default_baseline_from() -> f64 {
+    PLAUSIBLE_LOW_C
+}
+
 fn default_kp() -> f64 {
     140.0
 }
@@ -106,7 +125,7 @@ impl Default for Config {
             deadband_rpm: 40,
             min_rpm: None,
             max_rpm: None,
-            plausible_range_c: [5.0, 125.0],
+            plausible_range_c: [PLAUSIBLE_LOW_C, 125.0],
             sensor_grace_polls: 5,
             sensors: default_sensors(),
         }
@@ -277,11 +296,18 @@ impl Config {
                     s.critical
                 );
             }
-            if s.baseline_from < lo || s.critical > hi {
+            if s.baseline_from < lo {
                 bail!(
-                    "sensor {} has baseline_from/critical ({}/{}) outside plausible_range_c ([{lo}, {hi}]), so it could never be steered on",
+                    "sensor {} has baseline_from ({}) below the floor of plausible_range_c ({lo}), so its ramp would start below any temperature it can legibly read; unset it defaults to {}",
                     s.key,
                     s.baseline_from,
+                    PLAUSIBLE_LOW_C
+                );
+            }
+            if s.critical > hi {
+                bail!(
+                    "sensor {} has critical ({}) above the ceiling of plausible_range_c ({hi}), so it could never be steered on",
+                    s.key,
                     s.critical
                 );
             }
@@ -349,8 +375,26 @@ mod tests {
 
     #[test]
     fn a_baseline_below_the_plausible_range_is_rejected() {
-        // It could never be steered on: a reading that low is failed as a
-        // misreport before it ever reaches the ramp.
+        // Its ramp would start below anything the sensor can legibly read, so
+        // it would arrive already partly wound up with nothing to say why.
         assert!(parse(&sensor("baseline_from = 2.0\ntarget = 80.0\ncritical = 95.0")).is_err());
+    }
+
+    #[test]
+    fn a_sensor_that_names_no_baseline_ramps_from_the_bottom_of_the_plausible_range() {
+        // The one unknown that must not resolve to silence. An operator who has
+        // not said where this sensor should spin up gets the earliest ramp
+        // there is — more air than any measured configuration asks for, never
+        // less.
+        let config = parse(&sensor("target = 80.0\ncritical = 95.0")).expect("valid");
+        assert_eq!(config.sensors[0].baseline_from, PLAUSIBLE_LOW_C);
+    }
+
+    #[test]
+    fn raising_the_plausible_floor_past_the_default_baseline_is_a_startup_error() {
+        // The default only makes sense against the default floor. Raising one
+        // without the other is caught and named rather than silently clamped.
+        let body = format!("plausible_range_c = [40.0, 125.0]\n{}", sensor("target = 80.0\ncritical = 95.0"));
+        assert!(parse(&body).is_err());
     }
 }

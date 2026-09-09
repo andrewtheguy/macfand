@@ -372,6 +372,26 @@ mod tests {
     }
 
     #[test]
+    fn an_unnamed_baseline_errs_towards_air_rather_than_towards_quiet() {
+        // config.rs defaults baseline_from to the bottom of the plausible
+        // range. At the package's ordinary 70C that asks for far more air than
+        // the measured 60 the defaults ship — which is the point: the sensor
+        // whose ramp nobody has measured is the one to be loud about.
+        let mut unnamed = cfg("Package id 0", 80.0, 95.0);
+        unnamed.baseline_from = 5.0;
+        let mut measured = cfg("Package id 0", 80.0, 95.0);
+        measured.baseline_from = 60.0;
+
+        let demand = |c: SensorConfig| {
+            let mut s = Sensor::new(c, Path::new("/nonexistent"));
+            s.last_good = Some(70.0);
+            governor(vec![s]).step(1.0).rpm
+        };
+        assert_eq!(demand(measured), 3200, "2000 + (70-60)/(95-60) * 4200");
+        assert_eq!(demand(unnamed), 5033, "2000 + (70-5)/(95-5) * 4200");
+    }
+
+    #[test]
     fn the_integral_closes_a_gap_that_proportional_alone_leaves_open() {
         // A sensor parked 2 degrees over target: kp alone contributes a fixed
         // 200 rpm forever, and the baseline a fixed amount for that
