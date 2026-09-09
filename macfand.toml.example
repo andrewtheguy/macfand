@@ -38,7 +38,7 @@ sensor_grace_polls = 5
 
 # Sensors are named by their label, not by the tempN_input file they live in:
 # the numbering is assigned in probe order and is not stable across kernels.
-# `macfand --show` lists every label this machine exposes.
+# `macfand show` lists every label this machine exposes.
 #
 #   target              the temperature the sensor is steered towards
 #   critical            above this the fan goes straight to maximum

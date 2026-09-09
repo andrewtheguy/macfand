@@ -71,7 +71,7 @@ Architecture: amd64
 Maintainer: andrewtheguy <andrewchen5678@gmail.com>
 Section: admin
 Priority: optional
-Depends: libc6 (>= ${glibc_min}), systemd
+Depends: libc6 (>= ${glibc_min}), systemd, init-system-helpers (>= 1.54~)
 Conflicts: mbpfan, macfanctld
 Homepage: https://github.com/andrewtheguy/macfand
 Description: Multi-sensor fan control daemon for Intel MacBooks
@@ -79,7 +79,8 @@ Description: Multi-sensor fan control daemon for Intel MacBooks
  whichever one is asking for the most air, so a hot chassis or PCH raises the
  fan even when the CPU package is comfortable.
  .
- Installing enables and starts macfand.service. It Conflicts with mbpfan and
+ Installing enables and starts macfand.service, unless a systemd preset, a
+ policy-rc.d or an existing mask says not to. It Conflicts with mbpfan and
  macfanctld because two daemons writing fan1_output overwrite each other.
 CONTROL
 

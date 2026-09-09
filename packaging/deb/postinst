@@ -2,39 +2,68 @@
 # Register the unit and, on a fresh install, start it. A fan daemon that is
 # installed but not running is worse than one that was never installed: the
 # operator believes the fan is being driven, and it is not.
+#
+# Every systemd action here goes through deb-systemd-helper and
+# deb-systemd-invoke rather than through systemctl directly. That is what makes
+# the three admin-side opt-outs work — a `disable macfand.service` preset, a
+# policy-rc.d returning 101, and a `systemctl mask` taken before the install —
+# and it is what remembers, across upgrades and reinstalls, that an operator
+# disabled the unit.
 set -e
 
 unit=macfand.service
 
-[ "$1" = configure ] || exit 0
-[ -d /run/systemd/system ] || exit 0
+case "$1" in
+    configure | abort-upgrade | abort-deconfigure | abort-remove) ;;
+    *) exit 0 ;;
+esac
 
-systemctl daemon-reload
+# Lifts only the mask postrm took on a previous removal: a mask the operator
+# took by hand has no state file behind it and is deliberately left in place.
+deb-systemd-helper unmask "$unit" >/dev/null || true
 
 # Two daemons writing fan1_output overwrite each other's commands. The package
 # Conflicts with mbpfan and macfanctld, so anything still running at this point
 # was installed outside dpkg and only the operator can retire it. Leave macfand
 # both stopped and disabled rather than arranging for the fight at next boot.
 for other in mbpfan.service macfanctld.service; do
-    if systemctl is-active --quiet "$other"; then
+    if systemctl is-active --quiet "$other" 2>/dev/null; then
         echo "macfand: $other is running and would fight macfand over the fan." >&2
-        echo "macfand: leaving $unit stopped. To switch over:" >&2
+        echo "macfand: leaving $unit stopped and disabled. To switch over:" >&2
         echo "macfand:   systemctl disable --now $other && systemctl enable --now $unit" >&2
+        # Record the unit's link state even so, or purge has nothing to undo.
+        deb-systemd-helper update-state "$unit" >/dev/null || true
         exit 0
     fi
 done
 
+# `was-enabled` answers true for a unit dpkg has not seen before, so a fresh
+# install enables while an operator's `systemctl disable` survives an upgrade.
+# The enable itself runs `systemctl preset`, which is where a site's preset file
+# gets its say.
+if deb-systemd-helper --quiet was-enabled "$unit"; then
+    deb-systemd-helper enable "$unit" >/dev/null || true
+else
+    deb-systemd-helper update-state "$unit" >/dev/null || true
+fi
+
+# Enabling is just symlinks and works in a chroot; starting needs a systemd to
+# start it.
+[ -d /run/systemd/system ] || exit 0
+systemctl daemon-reload >/dev/null || true
+
 if [ -z "${2:-}" ]; then
-    systemctl enable --quiet "$unit"
     # A start failure here is a property of the machine — no SMC, or an applesmc
     # that will not hand the fan over — not of the package. It must not leave
-    # dpkg stuck on a package it cannot finish configuring.
-    systemctl start "$unit" \
+    # dpkg stuck on a package it cannot finish configuring. A unit left disabled
+    # by a preset or by policy-rc.d is not started either, and deb-systemd-invoke
+    # says which on stderr; that is the opt-out working, not a failure.
+    deb-systemd-invoke start "$unit" \
         || echo "macfand: $unit did not start; see: systemctl status $unit" >&2
 else
     # Upgrade: pick up the new binary, but only if it was actually running. An
-    # operator who disabled it stays disabled.
-    systemctl try-restart "$unit" || true
+    # operator who stopped or disabled it stays that way.
+    deb-systemd-invoke try-restart "$unit" >/dev/null || true
 fi
 
 exit 0

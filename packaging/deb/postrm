@@ -6,7 +6,18 @@
 set -e
 
 case "$1" in
-    remove | purge) ;;
+    remove)
+        # The enable symlinks in /etc outlive a remove, and would point at a
+        # unit file that is no longer there. Masking covers that gap; postinst's
+        # unmask lifts it again if the package comes back.
+        deb-systemd-helper mask macfand.service >/dev/null || true
+        ;;
+    purge)
+        # Only purge discards the operator's enable state and the symlinks
+        # behind it. A remove that is reinstalled later gets both back.
+        deb-systemd-helper purge macfand.service >/dev/null || true
+        deb-systemd-helper unmask macfand.service >/dev/null || true
+        ;;
     *) exit 0 ;;
 esac
 

@@ -3,12 +3,17 @@
 # ExecStopPost, which hands the fans back to the SMC; remove the package while
 # it is still running and the SMC is left holding macfand's last commanded
 # speed forever — pinned at maximum after a hot spell, or at idle mid-compile.
+#
+# It does not disable the unit. Whether macfand is enabled is the operator's
+# state, held by deb-systemd-helper and cleared by postrm on purge; disabling
+# here would throw away a decision they get to keep across a reinstall.
 set -e
 
 [ "$1" = remove ] || exit 0
 [ -d /run/systemd/system ] || exit 0
 
-systemctl disable --quiet macfand.service || true
-systemctl stop macfand.service || true
+# A policy-rc.d that blocks this leaves macfand running with its unit file gone.
+# It still has its signal handlers, so killing it hands the fans back.
+deb-systemd-invoke stop macfand.service >/dev/null || true
 
 exit 0
