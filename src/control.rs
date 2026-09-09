@@ -187,6 +187,8 @@ pub struct Governor {
     ramp_up: f64,
     down_step: f64,
     down_interval: f64,
+    /// The longest `dt` the controller will integrate over or slew up on.
+    max_control_dt: f64,
     plausible: [f64; 2],
     grace: u32,
     /// The speed last commanded, which the slew limit works from.
@@ -216,6 +218,7 @@ impl Governor {
             ramp_up: config.ramp_up_rpm_per_s,
             down_step: config.ramp_down_step_rpm as f64,
             down_interval: config.ramp_down_step_interval_s,
+            max_control_dt: config.poll_interval().as_secs_f64() * 4.0,
             plausible: config.plausible_range_c,
             grace: config.sensor_grace_polls,
             current: start_rpm.clamp(min_rpm, max_rpm) as f64,
@@ -232,13 +235,24 @@ impl Governor {
             .collect()
     }
 
-    /// Fold the sensors into one command. `dt` is the elapsed wall time since
-    /// the previous call, in seconds.
+    /// Fold the sensors into one command. `dt` is the real elapsed wall time
+    /// since the previous call, in seconds, unclamped: a suspend/resume cycle
+    /// or a stalled poll hands us an enormous one, and the two halves of this
+    /// want opposite things from it.
+    ///
+    /// The controller gets a clamped copy, because an hour of `dt` integrated
+    /// in one go would jump the fan straight to maximum on a machine that has
+    /// been asleep and is reading cold. The step-down gets the real thing,
+    /// because its hold is a wall-clock hold — a fan that has been sitting at
+    /// one speed for a minute has served every plateau it owes, whether or not
+    /// this process was awake to count them, and clamping there would leave a
+    /// resumed machine walking down from a stale speed one step per interval.
     pub fn step(&mut self, dt: f64) -> Command {
+        let control_dt = dt.clamp(0.0, self.max_control_dt);
         let (min, max) = (self.min_rpm, self.max_rpm);
         let mut best = (min, Reason::Idle);
         for sensor in &mut self.sensors {
-            let (rpm, reason) = sensor.demand(dt, min, max);
+            let (rpm, reason) = sensor.demand(control_dt, min, max);
             // A critical or failed sensor outranks a merely hot one even if the
             // arithmetic ties, so the log names the urgent reason.
             let outranks = rpm > best.0
@@ -256,7 +270,8 @@ impl Governor {
         // critical sensor at startup would be the speed we started at.
         let urgent = matches!(reason, Reason::Critical(_) | Reason::Failed(_));
         if target > self.current {
-            self.current = if urgent { target } else { (self.current + self.ramp_up * dt).min(target) };
+            self.current =
+                if urgent { target } else { (self.current + self.ramp_up * control_dt).min(target) };
             self.holding_for = 0.0;
         } else if target < self.current {
             // Coming down is not a rate at all: the fan holds one speed for
@@ -266,7 +281,7 @@ impl Governor {
             // changing is what the ear picks out — a handful of audible steps
             // with a steady stretch between them disappears into the room in a
             // way a minute of continuous glide does not.
-            self.holding_for += dt;
+            self.holding_for += dt.max(0.0);
             let steps = (self.holding_for / self.down_interval).floor();
             if steps >= 1.0 {
                 self.holding_for -= steps * self.down_interval;
@@ -573,12 +588,24 @@ mod tests {
 
     #[test]
     fn a_long_poll_gap_takes_every_step_it_slept_through() {
-        // Suspend/resume, or a poll interval longer than the hold. The fan does
-        // not sit at a stale speed waiting to be paced back down one step per
-        // poll from wherever the sleep left it.
+        // Suspend/resume, or a stalled poll. The hold is a wall-clock hold, so
+        // a fan that has sat at one speed for 35 seconds has served three whole
+        // plateaus whether or not this process was awake to count them. The
+        // daemon hands `step` the real elapsed time for exactly this reason.
         let mut g = cooling_from_maximum(&stepping());
         assert_eq!(g.step(35.0).rpm, 5000, "three whole steps in 35 seconds");
         assert_eq!(g.step(5.0).rpm, 4600, "and the remainder carries into the next");
+    }
+
+    #[test]
+    fn a_long_poll_gap_is_not_integrated_in_one_go() {
+        // The other half of that unclamped dt. The step-down wants the real
+        // elapsed time; the controller must not have it, or an hour asleep
+        // integrates in a single poll and a machine that resumes barely warm
+        // comes back with its fan at maximum.
+        let mut g = governor(vec![sensor("TC0P", 75.0, 95.0, 77.0)]);
+        let cmd = g.step(3_600.0);
+        assert_eq!(cmd.rpm, 3176, "2000 + (77-70)/(95-70) * 4200: the baseline, not a wound-up integral");
     }
 
     #[test]
