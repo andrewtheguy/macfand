@@ -47,12 +47,26 @@ macfand --restore   # hand the fans back to the SMC
 `--show` is how you find sensor labels to put in the config, and it does not need root:
 
 ```
+coretemp (/sys/devices/platform/coretemp.0)
+  Core 0           79.0 C
+  Core 1           77.0 C
+  Package id 0     79.0 C  (steering on this)
+
 applesmc (/sys/devices/platform/applesmc.768)
-  TC0J              1.5 C  (implausible — likely not populated)
-  TC0P             69.0 C  (steering on this)
-  TPCD             88.0 C  (steering on this)
-  Ts0S             52.8 C  (steering on this)
+  ...
+  TC0J              1.2 C  (implausible — likely not populated)
+  TC0P             66.2 C  (steering on this)
+  TCTD             -0.2 C  (implausible — likely not populated)
+  TM0P             52.5 C  (steering on this)
+  TPCD             83.0 C  (steering on this)
+  Ts0S             50.8 C  (steering on this)
+
+fans (/sys/devices/platform/applesmc.768)
+  Exhaust         6201 rpm   range 2000-6200 rpm   SMC
 ```
+
+Trimmed — this machine exposes 21 applesmc sensors. The `fans` line is where the
+hardware rpm range comes from, which is what `min_rpm` and `max_rpm` narrow.
 
 Sensors are named by label, never by the `tempN_input` file they happen to live in — the numbering is assigned in probe order and is not stable across kernels, so a config naming `temp18_input` would quietly start steering from the wrong sensor after an upgrade.
 
@@ -87,7 +101,19 @@ A daemon holding the SMC in manual mode is holding a loaded gun: the SMC keeps r
 
 ## The defaults, and where they come from
 
-The shipped defaults were measured on a MacBookPro9,2 (13-inch, mid-2012, Debian 13), not guessed. Two of its sensors turn out to be nearly uncontrollable, which is worth knowing before you set a target on them:
+The shipped defaults were measured on a MacBookPro9,2 (13-inch, mid-2012, Debian 13), not guessed. Five sensors ship configured:
+
+| sensor | source | target | critical | capped | |
+|---|---|---|---|---|---|
+| `Package id 0` | coretemp | 80 | 95 | — | The CPU package, clear of its 87 °C `temp1_max` |
+| `TC0P` | applesmc | 75 | 95 | — | CPU proximity; tracks both load and fan speed |
+| `TPCD` | applesmc | 90 | 100 | 1500 rpm | The PCH die — see below |
+| `Ts0S` | applesmc | 55 | 70 | 1200 rpm | Palm rest skin — see below |
+| `TM0P` | applesmc | 75 | 95 | — | Memory proximity; `optional`, absent on some models |
+
+`TM0P` is the only one marked `optional`, so a board without it starts normally rather than erroring out.
+
+Two of these sensors turn out to be nearly uncontrollable, which is worth knowing before you set a target on them:
 
 | condition | package | TC0P | **TPCD** | **Ts0S** | fan |
 |---|---|---|---|---|---|
