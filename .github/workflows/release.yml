@@ -1,0 +1,107 @@
+name: Release (Manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.version.outputs.new }}
+      is_prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          version=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          if [ -z "$version" ]; then
+            echo "::error::Could not parse version from Cargo.toml"
+            exit 1
+          fi
+          tag="v$version"
+          echo "new=$tag" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Abort if tag already exists
+        run: |
+          if git ls-remote --tags origin "refs/tags/${{ steps.version.outputs.new }}" | grep -q .; then
+            echo "::error::Tag ${{ steps.version.outputs.new }} already exists on remote"
+            exit 1
+          fi
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "${{ steps.version.outputs.new }}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx true; then
+            echo "Deleting stale draft release ${{ steps.version.outputs.new }}"
+            gh release delete "${{ steps.version.outputs.new }}" --yes
+          fi
+          gh release create "${{ steps.version.outputs.new }}" \
+            --draft \
+            --target "${{ github.sha }}" \
+            --title "Release ${{ steps.version.outputs.new }}" \
+            --generate-notes \
+            ${{ steps.version.outputs.prerelease == 'true' && '--prerelease' || '' }}
+
+  build:
+    needs: setup
+    strategy:
+      matrix:
+        include:
+          # Intel Macs only — there is no arm64 machine with an Apple SMC that
+          # this could ever run on.
+          - runner: ubuntu-latest
+            label: linux-amd64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build the .deb
+        run: bash packaging/build-deb.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macfand-${{ matrix.label }}
+          path: dist/macfand-${{ matrix.label }}.deb
+          if-no-files-found: error
+
+  create-release:
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: macfand-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Upload artifacts to draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "${{ needs.setup.outputs.release_tag }}" artifacts/* --clobber
+
+      - name: Publish release (remove draft, creates the tag)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "${{ needs.setup.outputs.release_tag }}" --draft=false

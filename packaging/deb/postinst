@@ -1,0 +1,40 @@
+#!/bin/sh
+# Register the unit and, on a fresh install, start it. A fan daemon that is
+# installed but not running is worse than one that was never installed: the
+# operator believes the fan is being driven, and it is not.
+set -e
+
+unit=macfand.service
+
+[ "$1" = configure ] || exit 0
+[ -d /run/systemd/system ] || exit 0
+
+systemctl daemon-reload
+
+# Two daemons writing fan1_output overwrite each other's commands. The package
+# Conflicts with mbpfan and macfanctld, so anything still running at this point
+# was installed outside dpkg and only the operator can retire it. Leave macfand
+# both stopped and disabled rather than arranging for the fight at next boot.
+for other in mbpfan.service macfanctld.service; do
+    if systemctl is-active --quiet "$other"; then
+        echo "macfand: $other is running and would fight macfand over the fan." >&2
+        echo "macfand: leaving $unit stopped. To switch over:" >&2
+        echo "macfand:   systemctl disable --now $other && systemctl enable --now $unit" >&2
+        exit 0
+    fi
+done
+
+if [ -z "${2:-}" ]; then
+    systemctl enable --quiet "$unit"
+    # A start failure here is a property of the machine — no SMC, or an applesmc
+    # that will not hand the fan over — not of the package. It must not leave
+    # dpkg stuck on a package it cannot finish configuring.
+    systemctl start "$unit" \
+        || echo "macfand: $unit did not start; see: systemctl status $unit" >&2
+else
+    # Upgrade: pick up the new binary, but only if it was actually running. An
+    # operator who disabled it stays disabled.
+    systemctl try-restart "$unit" || true
+fi
+
+exit 0

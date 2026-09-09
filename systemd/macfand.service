@@ -1,0 +1,40 @@
+[Unit]
+Description=Multi-sensor fan control for Intel MacBooks
+Documentation=https://github.com/andrewtheguy/macfand
+# Nothing to drive without an SMC.
+ConditionPathExistsGlob=/sys/devices/platform/applesmc*
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/macfand
+# macfand pings the watchdog every poll. A daemon that wedges while holding the
+# fan in manual mode would otherwise leave it stuck at its last speed forever.
+WatchdogSec=30s
+Restart=always
+RestartSec=2
+
+# macfand hands the fan back to the SMC itself on a clean exit or a signal, but
+# it cannot do so if it is SIGKILLed — which is exactly what the watchdog and
+# `systemctl kill -s KILL` do. This covers that.
+ExecStopPost=/usr/bin/macfand --restore
+
+# It reads two hwmon trees and writes one, and needs nothing else. ProtectSystem
+# leaves /sys writable by design, which is the one thing it does need.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
