@@ -57,15 +57,10 @@ pub struct SensorConfig {
     /// under target — steering *down* on the strength of sensors nothing else
     /// reads, which is the reverse of the point.
     ///
-    /// Unset, it starts at the bottom of the plausible range, ramping across
-    /// everything the sensor can legibly read. That is the most air any ramp
-    /// can ask for, and deliberately so: an operator who has not said where a
-    /// sensor should begin spinning up has not said it is safe to wait, and
-    /// every other unknown here — a failed sensor, an implausible reading, a
-    /// tachometer that will not read — already resolves towards air. It is
-    /// louder than any measured configuration, so it is the kind of wrong that
-    /// gets noticed and corrected rather than the kind that cooks a laptop.
-    #[serde(default = "default_baseline_from")]
+    /// Required, like `target` and `critical` and for the same reason: the
+    /// right value comes from where this particular sensor actually sits, and
+    /// no default can know that. A guess would be either louder than the
+    /// machine needs forever or quieter than it needs when it matters.
     pub baseline_from: f64,
     /// The temperature this sensor is steered towards. Past it the PI
     /// controller takes over from the baseline ramp wherever it asks for more.
@@ -99,15 +94,6 @@ pub struct SensorConfig {
     pub optional: bool,
 }
 
-/// The bottom of the plausible temperature range, and so the earliest a
-/// baseline ramp can start. A reading below this is a misreport rather than a
-/// temperature, so there is nothing colder for a ramp to begin at.
-const PLAUSIBLE_LOW_C: f64 = 5.0;
-
-fn default_baseline_from() -> f64 {
-    PLAUSIBLE_LOW_C
-}
-
 fn default_kp() -> f64 {
     140.0
 }
@@ -125,7 +111,7 @@ impl Default for Config {
             deadband_rpm: 40,
             min_rpm: None,
             max_rpm: None,
-            plausible_range_c: [PLAUSIBLE_LOW_C, 125.0],
+            plausible_range_c: [5.0, 125.0],
             sensor_grace_polls: 5,
             sensors: default_sensors(),
         }
@@ -298,10 +284,9 @@ impl Config {
             }
             if s.baseline_from < lo {
                 bail!(
-                    "sensor {} has baseline_from ({}) below the floor of plausible_range_c ({lo}), so its ramp would start below any temperature it can legibly read; unset it defaults to {}",
+                    "sensor {} has baseline_from ({}) below the floor of plausible_range_c ({lo}), so its ramp would start below any temperature it can legibly read",
                     s.key,
-                    s.baseline_from,
-                    PLAUSIBLE_LOW_C
+                    s.baseline_from
                 );
             }
             if s.critical > hi {
@@ -381,20 +366,32 @@ mod tests {
     }
 
     #[test]
-    fn a_sensor_that_names_no_baseline_ramps_from_the_bottom_of_the_plausible_range() {
-        // The one unknown that must not resolve to silence. An operator who has
-        // not said where this sensor should spin up gets the earliest ramp
-        // there is — more air than any measured configuration asks for, never
-        // less.
-        let config = parse(&sensor("target = 80.0\ncritical = 95.0")).expect("valid");
-        assert_eq!(config.sensors[0].baseline_from, PLAUSIBLE_LOW_C);
+    fn a_sensor_that_names_no_baseline_is_a_startup_error() {
+        // No default: where a sensor starts asking for air depends on where
+        // that sensor actually sits, and a guess is either loud forever or
+        // quiet when it matters. Refusing to start hands the fans back to the
+        // SMC, which is a better answer than either.
+        assert!(parse(&sensor("target = 80.0\ncritical = 95.0")).is_err());
     }
 
     #[test]
-    fn raising_the_plausible_floor_past_the_default_baseline_is_a_startup_error() {
-        // The default only makes sense against the default floor. Raising one
-        // without the other is caught and named rather than silently clamped.
-        let body = format!("plausible_range_c = [40.0, 125.0]\n{}", sensor("target = 80.0\ncritical = 95.0"));
-        assert!(parse(&body).is_err());
+    fn keys_this_daemon_does_not_understand_are_refused() {
+        // A misspelled or aspirational key must not be read as "leave it at the
+        // default": the operator asked for something, and silently not doing it
+        // is how a fan daemon ends up steering on a configuration nobody wrote.
+        for body in [
+            "poll_interval_ms = 1000\nramp_up_rpm_per_sec = 3000.0".to_string(),
+            "hysteresis_c = 2.0".to_string(),
+            sensor("baseline_from = 60.0\ntarget = 80.0\ncritical = 95.0\nkd = 1.0"),
+            sensor("baseline_from = 60.0\ntarget = 80.0\ncritical = 95.0\nlabel = \"cpu\""),
+        ] {
+            assert!(parse(&body).is_err(), "should have been rejected: {body:?}");
+        }
+    }
+
+    #[test]
+    fn a_source_this_daemon_cannot_read_is_refused() {
+        let body = "[[sensor]]\nsource = \"nct6775\"\nkey = \"fan1\"\nbaseline_from = 60.0\ntarget = 80.0\ncritical = 95.0";
+        assert!(parse(body).is_err());
     }
 }

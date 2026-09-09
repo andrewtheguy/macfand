@@ -81,7 +81,7 @@ Each sensor gets a `baseline_from`, a `target`, a `critical`, and PI gains. Ever
 
 A sensor's demand has two parts, and it takes whichever of them is asking for more:
 
-- **The baseline ramp** runs from the floor at `baseline_from` to the ceiling at `critical`, so the demand climbs with temperature over the sensor's whole working range. Naming no `baseline_from` ramps from the bottom of `plausible_range_c` — everything the sensor can legibly read, and so the most air any ramp can ask for. That is the same direction every other unknown here resolves in, and it is louder than any measured configuration, so an unconfigured sensor is the sort of wrong that gets noticed rather than the sort that cooks a laptop. This is the part that makes reading the extra sensors worth anything. A controller that only responds above its target contributes exactly nothing below it, so a board with every sensor a degree or two under target demands the floor from all of them at once — and the daemon then walks a fan the SMC had spun up all the way down, having consulted five sensors to arrive at less air than a daemon that reads one. With the ramp, the PCH at 89 °C asks for about 3900 rpm rather than for nothing.
+- **The baseline ramp** runs from the floor at `baseline_from` to the ceiling at `critical`, so the demand climbs with temperature over the sensor's whole working range. This is the part that makes reading the extra sensors worth anything. A controller that only responds above its target contributes exactly nothing below it, so a board with every sensor a degree or two under target demands the floor from all of them at once — and the daemon then walks a fan the SMC had spun up all the way down, having consulted five sensors to arrive at less air than a daemon that reads one. With the ramp, the PCH at 89 °C asks for about 3900 rpm rather than for nothing.
 - **The PI controller** takes over past `target`, where the ramp alone is no longer enough. The two compose by maximum rather than by sum, because `integral_limit_rpm` (below) exists precisely to stop one sensor pinning the fan, and adding the two would hand it that anyway by another route.
 
 Both are monotone in temperature, so a sensor getting hotter never asks for less air than it did a degree ago.
@@ -156,13 +156,15 @@ So `TPCD` ships with `baseline_from = 80.0` and `target = 90.0`: its baseline ra
 | `plausible_range_c` | `[5.0, 125.0]` | Outside this, a reading is a misreport, not a temperature |
 | `sensor_grace_polls` | `5` | Bad samples ridden out before a sensor is failed |
 
+A key macfand does not recognise is a startup error rather than something ignored: a misspelled `ramp_up_rpm_per_sec` that is silently dropped leaves the operator believing they configured something they did not.
+
 Per sensor:
 
 | Key | Description |
 |---|---|
 | `source` | `applesmc` or `coretemp` |
 | `key` | The sensor's label, e.g. `TPCD`, `Package id 0` |
-| `baseline_from` | Where its demand starts rising; a linear ramp from here to `critical`. Defaults to the bottom of `plausible_range_c`, which is the loudest ramp available — name a measured value |
+| `baseline_from` | Where its demand starts rising; a linear ramp from here to `critical`. Required, like `target` and `critical`: it depends on where the sensor actually sits |
 | `target` | The temperature it is steered towards |
 | `critical` | Above this, straight to maximum |
 | `kp` | rpm per degree over target |
