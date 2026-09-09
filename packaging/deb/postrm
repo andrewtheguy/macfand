@@ -1,0 +1,17 @@
+#!/bin/sh
+# The unit file is gone by now; tell systemd so, and clear the unit's residual
+# state. A failed macfand left in systemd's books after the package is removed
+# is litter, and it is litter that shows up as a red line in `systemctl status`
+# on a machine that no longer has macfand on it.
+set -e
+
+case "$1" in
+    remove | purge) ;;
+    *) exit 0 ;;
+esac
+
+[ -d /run/systemd/system ] || exit 0
+systemctl daemon-reload || true
+systemctl reset-failed macfand.service || true
+
+exit 0

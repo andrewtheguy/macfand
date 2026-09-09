@@ -6,42 +6,36 @@ A fan control daemon for Intel MacBooks that steers on every sensor on the board
 
 ## Install
 
-Prebuilt binaries are published for Linux on amd64. There is no arm64 build, because there is no arm64 machine with an Apple SMC.
-
-**Disable any other fan daemon first.** Two of them fighting over `fan1_output` will do exactly what you would expect, so this comes before macfand is started, not after:
+A `.deb` is published for Linux on amd64. There is no arm64 build, because there is no arm64 machine with an Apple SMC.
 
 ```sh
-sudo systemctl disable --now mbpfan      # or macfanctld, if that is what you run
+curl -fLO https://github.com/andrewtheguy/macfand/releases/latest/download/macfand-linux-amd64.deb
+sudo apt install ./macfand-linux-amd64.deb
 ```
 
-Then install the binary:
+That installs the binary, the systemd unit and the annotated config example, then enables and starts `macfand.service`. There is nothing further to do; `systemctl status macfand` should show it running.
+
+The package `Conflicts` with `mbpfan` and `macfanctld`, so apt will offer to remove whichever of them you have rather than let two daemons overwrite each other's writes to `fan1_output`. If you are running one that dpkg does not know about — built from source, say — the package leaves `macfand.service` stopped and tells you so; retire the other daemon and then:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/andrewtheguy/macfand/main/install.sh | sh
-```
-
-Or build from source with a recent Rust toolchain, and put it where the unit expects it:
-
-```sh
-cargo install --git https://github.com/andrewtheguy/macfand
-sudo install -m 755 ~/.cargo/bin/macfand /usr/local/bin/macfand
-```
-
-Both of those install the binary and nothing else, so fetch the unit separately — it is what makes the daemon safe to run unattended:
-
-```sh
-sudo curl -fsSL -o /etc/systemd/system/macfand.service \
-  https://raw.githubusercontent.com/andrewtheguy/macfand/main/systemd/macfand.service
-
-# Optional. The defaults are built in, so the daemon runs correctly without it.
-sudo curl -fsSL -o /etc/macfand.toml \
-  https://raw.githubusercontent.com/andrewtheguy/macfand/main/macfand.toml.example
-
-sudo systemctl daemon-reload
 sudo systemctl enable --now macfand
 ```
 
-From a clone of the repository, `sudo cp systemd/macfand.service /etc/systemd/system/` and `sudo cp macfand.toml.example /etc/macfand.toml` do the same thing.
+To build the same package from a clone, with a recent Rust toolchain and `dpkg-deb` installed:
+
+```sh
+bash packaging/build-deb.sh          # writes dist/macfand-linux-amd64.deb
+sudo apt install ./dist/macfand-linux-amd64.deb
+```
+
+The package owns `/usr/bin/macfand`, `/usr/lib/systemd/system/macfand.service` and `/usr/share/doc/macfand/macfand.toml.example`. It does **not** own `/etc/macfand.toml`: every key is optional and the built-in defaults are a complete configuration, so the daemon runs correctly with no config at all. Copy the example there when you want to change something, and upgrades will leave your edits alone.
+
+```sh
+sudo cp /usr/share/doc/macfand/macfand.toml.example /etc/macfand.toml
+sudo systemctl restart macfand
+```
+
+`sudo apt remove macfand` stops the daemon first, which hands the fans back to the SMC.
 
 ## Use
 
@@ -112,7 +106,7 @@ So `TPCD` ships with `target = 90.0` — at the top of that range, where it cont
 
 ## Configuration
 
-`/etc/macfand.toml`, or `--config PATH`. Every key is optional and an empty file is valid; see `macfand.toml.example` for the annotated defaults.
+`/etc/macfand.toml`, or `--config PATH`. Every key is optional and an empty file is valid; see `macfand.toml.example` in the repository, installed as `/usr/share/doc/macfand/macfand.toml.example`, for the annotated defaults.
 
 | Key | Default | Description |
 |---|---|---|

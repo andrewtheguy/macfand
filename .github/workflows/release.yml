@@ -70,17 +70,14 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Build
-        run: cargo build --release
-
-      - name: Rename binary
-        run: mv target/release/macfand target/release/macfand-${{ matrix.label }}
+      - name: Build the .deb
+        run: bash packaging/build-deb.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: macfand-${{ matrix.label }}
-          path: target/release/macfand-${{ matrix.label }}
+          path: dist/macfand-${{ matrix.label }}.deb
           if-no-files-found: error
 
   create-release:
