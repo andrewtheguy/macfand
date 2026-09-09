@@ -2,7 +2,7 @@
 //! watchdog, without taking a dependency for it.
 //!
 //! The watchdog is the part that matters here: a fan daemon that wedges while
-//! holding the SMC in manual mode leaves the fan stuck at whatever it last
+//! it is the one driving the SMC's fans leaves them stuck at whatever it last
 //! commanded. Letting systemd notice and restart us — which runs the unit's
 //! `ExecStopPost` and hands the fan back — is a much better failure than a
 //! silent stall.
