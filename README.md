@@ -37,6 +37,8 @@ sudo systemctl restart macfand
 
 `sudo apt remove macfand` stops the daemon first, which hands the fans back to the SMC.
 
+Installing enables and starts the service. To install without that — image builds, a machine being staged — drop a `disable macfand.service` preset in `/etc/systemd/system-preset/` first, or use `policy-rc.d`; see [packaging/README.md](packaging/README.md#installing-without-starting-it).
+
 ## Use
 
 ```sh
