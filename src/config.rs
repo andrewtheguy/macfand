@@ -21,9 +21,12 @@ pub struct Config {
     /// Generous by default: on this hardware a load step can put the package up
     /// 20 degrees inside five seconds, and the fan is already the slow part.
     pub ramp_up_rpm_per_s: f64,
-    /// Ceiling on how fast it may fall. Much slower than the rise, because a
-    /// fan that chases every dip in load is audible in a way a steady one is not.
-    pub ramp_down_rpm_per_s: f64,
+    /// How the speed comes back down: one drop of `ramp_down_step_rpm`, then a
+    /// hold of `ramp_down_step_interval_s` before the next. Deliberately not a
+    /// rate — a fan whose pitch is a little different every second is audible
+    /// in a way a fan that holds one speed and occasionally drops is not.
+    pub ramp_down_step_rpm: u32,
+    pub ramp_down_step_interval_s: f64,
     /// Don't rewrite the fan for a change smaller than this.
     pub deadband_rpm: u32,
     /// Narrow the speed range the SMC reports. `None` uses the hardware bounds.
@@ -107,7 +110,8 @@ impl Default for Config {
         Config {
             poll_interval_ms: 1000,
             ramp_up_rpm_per_s: 3000.0,
-            ramp_down_rpm_per_s: 200.0,
+            ramp_down_step_rpm: 400,
+            ramp_down_step_interval_s: 10.0,
             deadband_rpm: 40,
             min_rpm: None,
             max_rpm: None,
@@ -231,7 +235,7 @@ impl Config {
         // the steering or critical thresholds it was written into.
         for (name, value) in [
             ("ramp_up_rpm_per_s", self.ramp_up_rpm_per_s),
-            ("ramp_down_rpm_per_s", self.ramp_down_rpm_per_s),
+            ("ramp_down_step_interval_s", self.ramp_down_step_interval_s),
             ("plausible_range_c[0]", self.plausible_range_c[0]),
             ("plausible_range_c[1]", self.plausible_range_c[1]),
         ] {
@@ -239,8 +243,16 @@ impl Config {
                 bail!("{name} must be a finite number (got {value})");
             }
         }
-        if self.ramp_up_rpm_per_s <= 0.0 || self.ramp_down_rpm_per_s <= 0.0 {
-            bail!("ramp_up_rpm_per_s and ramp_down_rpm_per_s must be greater than 0");
+        if self.ramp_up_rpm_per_s <= 0.0 {
+            bail!("ramp_up_rpm_per_s must be greater than 0");
+        }
+        // Either one at zero is a fan that never comes down again: no step to
+        // take, or no interval short enough to ever take one in.
+        if self.ramp_down_step_rpm == 0 {
+            bail!("ramp_down_step_rpm must be greater than 0, or the fan could never come down");
+        }
+        if self.ramp_down_step_interval_s <= 0.0 {
+            bail!("ramp_down_step_interval_s must be greater than 0");
         }
         let [lo, hi] = self.plausible_range_c;
         if lo >= hi {
@@ -336,7 +348,7 @@ mod tests {
         // against every bound, so nothing else in validate() catches them.
         for body in [
             "ramp_up_rpm_per_s = nan".to_string(),
-            "ramp_down_rpm_per_s = inf".to_string(),
+            "ramp_down_step_interval_s = inf".to_string(),
             "plausible_range_c = [nan, 125.0]".to_string(),
             sensor("baseline_from = nan\ntarget = 80.0\ncritical = 95.0"),
             sensor("baseline_from = 60.0\ntarget = nan\ncritical = 95.0"),
@@ -346,6 +358,16 @@ mod tests {
         ] {
             assert!(parse(&body).is_err(), "should have been rejected: {body:?}");
         }
+    }
+
+    #[test]
+    fn a_step_down_that_could_never_take_a_step_is_rejected() {
+        // Either of these is a fan that goes up and never comes back down,
+        // which is the one direction a slew limit must not be able to express.
+        let body = sensor("baseline_from = 60.0\ntarget = 80.0\ncritical = 95.0");
+        assert!(parse(&format!("ramp_down_step_rpm = 0\n{body}")).is_err());
+        assert!(parse(&format!("ramp_down_step_interval_s = 0.0\n{body}")).is_err());
+        assert!(parse(&format!("ramp_down_step_rpm = 400\n{body}")).is_ok());
     }
 
     #[test]

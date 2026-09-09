@@ -143,7 +143,7 @@ impl Sensor {
         if temp >= self.cfg.critical {
             // The integral is deliberately left exactly as it was: neither
             // accumulated while critical, nor synthesised on the way out. The
-            // descent out of an excursion is `ramp_down_rpm_per_s`'s job, and a
+            // descent out of an excursion is the step-down's job, and a
             // charged integral both takes it away from the slew limit and can
             // outlast the excursion indefinitely — a sensor that settles at
             // precisely its target has no error left to unwind it with.
@@ -185,11 +185,16 @@ pub struct Governor {
     min_rpm: f64,
     max_rpm: f64,
     ramp_up: f64,
-    ramp_down: f64,
+    down_step: f64,
+    down_interval: f64,
     plausible: [f64; 2],
     grace: u32,
     /// The speed last commanded, which the slew limit works from.
     current: f64,
+    /// Seconds spent below the commanded speed since the last step down. Reset
+    /// whenever the demand stops asking for less, so every plateau is a whole
+    /// `down_interval` long rather than the tail of an interrupted one.
+    holding_for: f64,
 }
 
 impl Governor {
@@ -209,10 +214,12 @@ impl Governor {
             min_rpm: min_rpm as f64,
             max_rpm: max_rpm as f64,
             ramp_up: config.ramp_up_rpm_per_s,
-            ramp_down: config.ramp_down_rpm_per_s,
+            down_step: config.ramp_down_step_rpm as f64,
+            down_interval: config.ramp_down_step_interval_s,
             plausible: config.plausible_range_c,
             grace: config.sensor_grace_polls,
             current: start_rpm.clamp(min_rpm, max_rpm) as f64,
+            holding_for: 0.0,
         }
     }
 
@@ -248,13 +255,27 @@ impl Governor {
         // the slew limit is nearly zero too, so without this the answer to a
         // critical sensor at startup would be the speed we started at.
         let urgent = matches!(reason, Reason::Critical(_) | Reason::Failed(_));
-        self.current = if urgent && target > self.current {
-            target
+        if target > self.current {
+            self.current = if urgent { target } else { (self.current + self.ramp_up * dt).min(target) };
+            self.holding_for = 0.0;
+        } else if target < self.current {
+            // Coming down is not a rate at all: the fan holds one speed for
+            // `down_interval` seconds and then drops a whole `down_step`. A
+            // continuous descent means the fan is at a slightly different pitch
+            // every second for the length of the ramp, and a fan that is always
+            // changing is what the ear picks out — a handful of audible steps
+            // with a steady stretch between them disappears into the room in a
+            // way a minute of continuous glide does not.
+            self.holding_for += dt;
+            let steps = (self.holding_for / self.down_interval).floor();
+            if steps >= 1.0 {
+                self.holding_for -= steps * self.down_interval;
+                self.current = (self.current - steps * self.down_step).max(target);
+            }
         } else {
-            let limit = if target > self.current { self.ramp_up } else { self.ramp_down } * dt;
-            self.current + (target - self.current).clamp(-limit, limit)
+            self.holding_for = 0.0;
         }
-        .clamp(min, max);
+        self.current = self.current.clamp(min, max);
         Command { rpm: self.current.round() as u32, reason }
     }
 }
@@ -286,9 +307,20 @@ mod tests {
         s
     }
 
+    /// A governor with the slew limits effectively switched off in both
+    /// directions, for the tests that are about the controller rather than
+    /// about how the commanded speed is paced.
     fn governor(sensors: Vec<Sensor>) -> Governor {
-        let config = Config { ramp_up_rpm_per_s: 100_000.0, ramp_down_rpm_per_s: 100_000.0, ..Config::default() };
-        Governor::new(&config, sensors, 2000, 6200, 2000)
+        Governor::new(&unpaced(), sensors, 2000, 6200, 2000)
+    }
+
+    fn unpaced() -> Config {
+        Config {
+            ramp_up_rpm_per_s: 100_000.0,
+            ramp_down_step_rpm: 100_000,
+            ramp_down_step_interval_s: 0.001,
+            ..Config::default()
+        }
     }
 
     #[test]
@@ -471,25 +503,82 @@ mod tests {
                 })
                 .collect();
             // Slew limiting is not what is under test here.
-            let config = Config {
-                ramp_up_rpm_per_s: 100_000.0,
-                ramp_down_rpm_per_s: 100_000.0,
-                ..Config::default()
-            };
-            let mut g = Governor::new(&config, sensors, 2000, 6200, 2000);
+            let mut g = Governor::new(&unpaced(), sensors, 2000, 6200, 2000);
             assert_eq!(g.step(1.0).rpm, expected, "{what}");
         }
     }
 
-    #[test]
-    fn ramp_down_is_rate_limited() {
-        let config = Config { ramp_up_rpm_per_s: 100_000.0, ramp_down_rpm_per_s: 200.0, ..Config::default() };
-        let mut g = Governor::new(&config, vec![sensor("TC0P", 75.0, 96.0, 95.0)], 2000, 6200, 2000);
+    /// A governor saturated at maximum with a sensor that has since gone cold,
+    /// which is the setup every step-down test wants.
+    fn cooling_from_maximum(config: &Config) -> Governor {
+        let mut g = Governor::new(config, vec![sensor("TC0P", 75.0, 96.0, 95.0)], 2000, 6200, 2000);
         // Hold it above target until the controller has saturated.
         while g.step(1.0).rpm < 6200 {}
         g.sensors[0].last_good = Some(40.0);
-        let cmd = g.step(1.0);
-        assert_eq!(cmd.rpm, 6000, "should fall by at most ramp_down_rpm_per_s in one second");
+        g
+    }
+
+    fn stepping() -> Config {
+        Config { ramp_up_rpm_per_s: 100_000.0, ..Config::default() }
+    }
+
+    #[test]
+    fn the_fan_holds_its_speed_between_steps_down() {
+        let mut g = cooling_from_maximum(&stepping());
+        // Nine seconds of a stone cold sensor still command exactly what the
+        // last step commanded: the point of stepping is the steady stretch.
+        for second in 1..=9 {
+            assert_eq!(g.step(1.0).rpm, 6200, "moved after {second}s of the hold");
+        }
+        assert_eq!(g.step(1.0).rpm, 5800, "the tenth second should drop a whole step");
+        for second in 1..=9 {
+            assert_eq!(g.step(1.0).rpm, 5800, "moved after {second}s of the second hold");
+        }
+        assert_eq!(g.step(1.0).rpm, 5400);
+    }
+
+    #[test]
+    fn stepping_down_stops_at_what_the_sensors_are_asking_for() {
+        // The last step is a partial one. Nothing undershoots the demand and
+        // then climbs back, which would be the fan hunting rather than settling.
+        let mut g = cooling_from_maximum(&stepping());
+        let mut previous = 6200;
+        for _ in 0..200 {
+            let rpm = g.step(1.0).rpm;
+            assert!(rpm <= previous, "climbed back from {previous} to {rpm}");
+            previous = rpm;
+        }
+        assert_eq!(previous, 2000, "40C asks for the floor, so that is where it lands");
+    }
+
+    #[test]
+    fn a_hold_interrupted_by_heat_starts_over_rather_than_resuming() {
+        // Halfway through a hold the machine gets busy again and the fan
+        // climbs. The step that was five seconds away must not land five
+        // seconds after it has finished climbing: every plateau the fan sits on
+        // is a whole interval long.
+        let mut g = cooling_from_maximum(&stepping());
+        for _ in 0..15 {
+            g.step(1.0);
+        }
+        g.sensors[0].last_good = Some(95.0);
+        let hot = g.step(1.0).rpm;
+        assert!(hot > 5800, "the demand should have climbed back, got {hot}");
+        g.sensors[0].last_good = Some(40.0);
+        for second in 1..=9 {
+            assert_eq!(g.step(1.0).rpm, hot, "stepped down {second}s into a fresh hold");
+        }
+        assert_eq!(g.step(1.0).rpm, hot - 400);
+    }
+
+    #[test]
+    fn a_long_poll_gap_takes_every_step_it_slept_through() {
+        // Suspend/resume, or a poll interval longer than the hold. The fan does
+        // not sit at a stale speed waiting to be paced back down one step per
+        // poll from wherever the sleep left it.
+        let mut g = cooling_from_maximum(&stepping());
+        assert_eq!(g.step(35.0).rpm, 5000, "three whole steps in 35 seconds");
+        assert_eq!(g.step(5.0).rpm, 4600, "and the remainder carries into the next");
     }
 
     #[test]

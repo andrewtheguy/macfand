@@ -9,14 +9,22 @@
 # more slowly than the watchdog deadline does not get the daemon killed.
 poll_interval_ms = 1000
 
-# Ceilings on how fast the commanded speed may change, in rpm per second.
-# Rising is deliberately near-instant: a load step on this hardware puts the
-# package up 20C inside five seconds and the fan is already the slow part.
-# Falling is slow, because a fan that chases every dip in load is audible in a
-# way a steady one is not. A sensor over its critical threshold, or one that has
-# failed, ignores the rising limit entirely and goes straight to maximum.
+# Ceiling on how fast the commanded speed may rise, in rpm per second.
+# Deliberately near-instant: a load step on this hardware puts the package up
+# 20C inside five seconds and the fan is already the slow part. A sensor over
+# its critical threshold, or one that has failed, ignores this entirely and goes
+# straight to maximum.
 ramp_up_rpm_per_s = 3000.0
-ramp_down_rpm_per_s = 200.0
+
+# Coming down is not a rate: the fan holds one speed for
+# ramp_down_step_interval_s seconds, drops a whole ramp_down_step_rpm, and holds
+# again. A fan whose pitch is a little different every second is audible in a
+# way a fan that sits still and occasionally drops is not. The defaults walk the
+# full 6200-2000 range down over about a minute and three quarters. A hold that
+# is interrupted by the machine getting busy starts over rather than resuming,
+# so every plateau is a whole interval long.
+ramp_down_step_rpm = 400
+ramp_down_step_interval_s = 10.0
 
 # Don't rewrite the fan for a change smaller than this.
 deadband_rpm = 40
