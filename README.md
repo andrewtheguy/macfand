@@ -66,7 +66,9 @@ fans (/sys/devices/platform/applesmc.768)
 ```
 
 Trimmed — this machine exposes 21 applesmc sensors. The `fans` line is where the
-hardware rpm range comes from, which is what `min_rpm` and `max_rpm` narrow.
+hardware rpm range comes from, which is what `min_rpm` and `max_rpm` narrow; its
+last column says who is driving that fan — `SMC` for the SMC's own curve, or
+`macfand` while the daemon has taken over.
 
 Sensors are named by label, never by the `tempN_input` file they happen to live in — the numbering is assigned in probe order and is not stable across kernels, so a config naming `temp18_input` would quietly start steering from the wrong sensor after an upgrade.
 
@@ -88,15 +90,15 @@ At startup macfand takes the fan over at whatever speed the SMC is already runni
 
 ## Failing safe
 
-A daemon holding the SMC in manual mode is holding a loaded gun: the SMC keeps running whatever speed it was last told, forever, so a daemon that dies without clearing the flag strands the fan — stuck at maximum after a hot spell, or stuck at idle in the middle of a compile.
+A daemon that has switched the SMC's own fan curve off is holding a loaded gun: the SMC keeps running whatever speed it was last told, forever, so a daemon that dies without clearing the flag strands the fan — stuck at maximum after a hot spell, or stuck at idle in the middle of a compile.
 
 - A sensor that stops reading, or reads outside `plausible_range_c`, is ridden out on its last good value for `sensor_grace_polls` and then **demands maximum**, never minimum. `applesmc` reports sensors that are not populated on a given board as 0 or 1 degrees, which a naive daemon reads as "very cold" and holds the fan down for.
 - A configured sensor that is missing or implausible **at startup is a hard error**, not a warning. Starting up having quietly dropped half its inputs is worse than not starting.
 - The fans are handed back to the SMC on a clean exit, on `SIGTERM`/`SIGINT`/`SIGHUP`, and on a panic.
 - `SIGKILL` cannot be caught, so the unit's `ExecStopPost` runs `macfand --restore` to cover it.
-- Only one macfand drives the fans. An `flock` on `/run/macfand.lock` is taken **before** anything is switched into manual mode: two daemons would overwrite each other's commands from two different configurations, and the first of them to exit would hand the fans back to the SMC while the other went on believing it was in control. A file lock rather than a pidfile, so `SIGKILL` releases it too.
+- Only one macfand drives the fans. An `flock` on `/run/macfand.lock` is taken **before** any fan is taken off the SMC's curve: two daemons would overwrite each other's commands from two different configurations, and the first of them to exit would hand the fans back to the SMC while the other went on believing it was in control. A file lock rather than a pidfile, so `SIGKILL` releases it too.
 - Handover starts from the speed the fans are already running at, so a machine that is already hot is not briefly slowed down. If any fan's tachometer will not read, macfand takes over at **maximum** rather than assuming the machine is idle — the first poll's `dt` is nearly zero, so the slew limit would take several seconds to walk a wrong guess back.
-- Fan writes that fail persistently — `MAX_WRITE_FAILURES` consecutive — **exit the daemon** rather than being logged forever. The fans are in manual mode for as long as macfand runs, so a daemon that cannot write is holding them at a stale speed; exiting hands them back to the SMC. One-off failures are ridden out, because `applesmc` returns `EBUSY` often enough on this hardware to matter.
+- Fan writes that fail persistently — `MAX_WRITE_FAILURES` consecutive — **exit the daemon** rather than being logged forever. The SMC's own curve is switched off for as long as macfand runs, so a daemon that cannot write is holding the fans at a stale speed; exiting hands them back to the SMC. One-off failures are ridden out, because `applesmc` returns `EBUSY` often enough on this hardware to matter.
 - The unit is `Type=notify` with `WatchdogSec=30s`. If the control loop wedges, systemd kills and restarts it — which also runs `ExecStopPost`. A wedged fan daemon that nobody notices is the worst outcome available. The watchdog is fed on its own schedule rather than once per poll, so `poll_interval_ms` can be set longer than `WatchdogSec` without systemd killing a daemon that is only being slow on purpose — and it is withheld entirely while fan writes are failing, so a daemon that has lost the fan never reports itself healthy.
 
 ## The defaults, and where they come from

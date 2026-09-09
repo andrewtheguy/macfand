@@ -8,8 +8,8 @@ ConditionPathExistsGlob=/sys/devices/platform/applesmc*
 Type=notify
 NotifyAccess=main
 ExecStart=/usr/bin/macfand
-# macfand pings the watchdog every poll. A daemon that wedges while holding the
-# fan in manual mode would otherwise leave it stuck at its last speed forever.
+# macfand pings the watchdog every poll. A daemon that wedges while it is the
+# one driving the fan would otherwise leave it stuck at its last speed forever.
 WatchdogSec=30s
 Restart=always
 RestartSec=2

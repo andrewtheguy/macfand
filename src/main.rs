@@ -38,9 +38,9 @@ const HEARTBEAT: Duration = Duration::from_secs(300);
 /// though the control loop itself runs once a second.
 const SIGNAL_GRANULARITY: Duration = Duration::from_millis(100);
 
-/// How many consecutive failed fan writes to give up after. The fans are in
-/// manual mode for as long as we run, so a daemon that cannot write is holding
-/// them at whatever it last managed to command. Exiting hands them back to the
+/// How many consecutive failed fan writes to give up after. The SMC's own fan
+/// curve is switched off for as long as we run, so a daemon that cannot write
+/// is holding the fans at whatever it last managed to command. Exiting hands them back to the
 /// SMC, which is a far better state than pretending to be in control of them.
 const MAX_WRITE_FAILURES: u32 = 5;
 
@@ -63,8 +63,9 @@ the CPU package is comfortable.
   --restore      hand every fan back to the SMC and exit
 
 Driving the fan needs root, and needs the applesmc and coretemp modules loaded.
-While macfand runs the fans are in manual mode; they are handed back to the SMC
-on exit, including on SIGTERM, SIGINT and SIGHUP.";
+While macfand runs it drives the fans itself, in place of the SMC's own curve;
+they are handed back to the SMC on exit, including on SIGTERM, SIGINT and
+SIGHUP.";
 
 fn main() {
     if let Err(e) = run() {
@@ -257,14 +258,14 @@ fn daemon(config_path: Option<&Path>) -> Result<()> {
     }
 
     // Registered before we touch the fans, so there is no window in which the
-    // SMC is in manual mode and a SIGTERM would not be caught.
+    // SMC's own curve is switched off and a SIGTERM would not be caught.
     let stop = Arc::new(AtomicBool::new(false));
     for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT, signal_hook::consts::SIGHUP] {
         signal_hook::flag::register(signal, Arc::clone(&stop))
             .with_context(|| format!("registering a handler for signal {signal}"))?;
     }
 
-    // Before anything is switched into manual mode, and declared before the
+    // Before any fan is taken off the SMC's curve, and declared before the
     // guard so that it is still held while the guard hands the fans back.
     let _fan_lock = Lock::acquire(Path::new(LOCK_PATH))?;
     let guard = FanGuard::engage(fans)?;
@@ -403,8 +404,8 @@ fn readings(governor: &Governor) -> String {
 
 /// An exclusive claim on the fans, held for as long as the process runs.
 ///
-/// Two daemons in manual mode fight: they overwrite each other's commands from
-/// two different configurations, and whichever exits first hands the fans back
+/// Two daemons driving the fans fight: they overwrite each other's commands
+/// from two different configurations, and whichever exits first hands the fans back
 /// to the SMC while the other goes on believing it is driving them. `flock`
 /// rather than a pidfile because the kernel drops it when the process dies
 /// however it dies — including under the SIGKILL that would strand a pidfile
@@ -440,10 +441,11 @@ impl Lock {
     }
 }
 
-/// Holds the fans in manual mode, and gives them back however we leave.
+/// Takes the fans off the SMC's own curve, and gives them back however we
+/// leave.
 ///
-/// The SMC keeps running whatever speed it was last told once it is in manual
-/// mode, so a daemon that exits without clearing the flag strands the fan —
+/// Once its curve is switched off the SMC keeps running whatever speed it was
+/// last told, so a daemon that exits without clearing the flag strands the fan —
 /// stuck at maximum after a hot spell, or worse, stuck at idle. Drop covers a
 /// clean exit, a signal and a panic; it cannot cover SIGKILL, which is what the
 /// unit's ExecStopPost is for.
@@ -457,7 +459,7 @@ impl FanGuard {
         // that were already switched over.
         let guard = FanGuard { fans };
         for fan in &guard.fans {
-            fan.set_manual(true)?;
+            fan.set_software_control(true)?;
         }
         Ok(guard)
     }
@@ -483,7 +485,7 @@ impl FanGuard {
 impl Drop for FanGuard {
     fn drop(&mut self) {
         for fan in &self.fans {
-            if let Err(e) = fan.set_manual(false) {
+            if let Err(e) = fan.set_software_control(false) {
                 eprintln!("macfand: could not hand {} back to the SMC: {e:#}", fan.label);
             }
         }
@@ -494,10 +496,10 @@ fn restore() -> Result<()> {
     let applesmc = Temps::discover(Source::Applesmc)?.dir;
     // Every fan is attempted even after one fails. This is the unit's
     // ExecStopPost recovery path, so a single busy or broken fan must not be
-    // what leaves the rest of them stranded in manual mode.
+    // what leaves the rest of them stranded off the SMC's curve.
     let mut stranded = Vec::new();
     for fan in discover_fans(&applesmc)? {
-        match fan.set_manual(false) {
+        match fan.set_software_control(false) {
             Ok(()) => println!("{} handed back to the SMC", fan.label),
             Err(e) => {
                 eprintln!("macfand: {e:#}");
@@ -506,7 +508,7 @@ fn restore() -> Result<()> {
         }
     }
     if !stranded.is_empty() {
-        bail!("still in manual mode: {}", stranded.join(", "));
+        bail!("still not back on the SMC's curve: {}", stranded.join(", "));
     }
     Ok(())
 }
@@ -544,7 +546,7 @@ fn show(config_path: Option<&Path>) -> Result<()> {
     println!("\nfans ({})", applesmc.display());
     for fan in discover_fans(&applesmc)? {
         let rpm = fan.rpm().map(|r| r.to_string()).unwrap_or_else(|_| "?".into());
-        let manual = std::fs::read_to_string(&fan.manual)
+        let driven_by_software = std::fs::read_to_string(&fan.control_mode)
             .map(|s| s.trim() == "1")
             .unwrap_or(false);
         println!(
@@ -552,7 +554,7 @@ fn show(config_path: Option<&Path>) -> Result<()> {
             fan.label,
             fan.hw_min,
             fan.hw_max,
-            if manual { "manual" } else { "SMC" }
+            if driven_by_software { "macfand" } else { "SMC" }
         );
     }
     Ok(())

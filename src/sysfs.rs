@@ -79,7 +79,9 @@ pub struct Fan {
     pub label: String,
     pub input: PathBuf,
     pub output: PathBuf,
-    pub manual: PathBuf,
+    /// `fanN_manual` in sysfs: 1 while software drives the fan, 0 while the
+    /// SMC's own curve does.
+    pub control_mode: PathBuf,
     pub hw_min: u32,
     pub hw_max: u32,
 }
@@ -97,9 +99,10 @@ impl Fan {
             .with_context(|| format!("setting {} to {rpm} rpm", self.label))
     }
 
-    pub fn set_manual(&self, manual: bool) -> Result<()> {
-        write_str(&self.manual, if manual { "1" } else { "0" })
-            .with_context(|| format!("handing {} {}", self.label, if manual { "to macfand" } else { "back to the SMC" }))
+    /// Hand the fan to macfand, or give it back to the SMC's own curve.
+    pub fn set_software_control(&self, software: bool) -> Result<()> {
+        write_str(&self.control_mode, if software { "1" } else { "0" })
+            .with_context(|| format!("handing {} {}", self.label, if software { "to macfand" } else { "back to the SMC" }))
     }
 }
 
@@ -136,7 +139,7 @@ pub fn discover_fans(applesmc: &Path) -> Result<Vec<Fan>> {
             label,
             input: p("_input"),
             output: p("_output"),
-            manual: p("_manual"),
+            control_mode: p("_manual"),
             hw_min,
             hw_max,
         });
